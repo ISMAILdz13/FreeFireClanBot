@@ -1,0 +1,11 @@
+[
+  {
+    "uid": "YOUR_GUEST_UID",
+    "password": "YOUR_GUEST_PASSWORD",
+    "name": "GuestName",
+    "region": "ME",
+    "status": "registered",
+    "open_id": "YOUR_OPEN_ID",
+    "access_token": "YOUR_ACCESS_TOKEN"
+  }
+]

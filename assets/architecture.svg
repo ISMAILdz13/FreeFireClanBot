@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="320" viewBox="0 0 640 320">
+  <defs>
+    <linearGradient id="cG1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#a855f7"/><stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="cG2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ec4899"/><stop offset="100%" style="stop-color:#be185d"/>
+    </linearGradient>
+    <linearGradient id="cG3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4facfe"/><stop offset="100%" style="stop-color:#00f2fe"/>
+    </linearGradient>
+    <linearGradient id="cG4" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#43e97b"/><stop offset="100%" style="stop-color:#38b876"/>
+    </linearGradient>
+    <filter id="cS"><feDropShadow dx="2" dy="3" stdDeviation="3" flood-opacity="0.3"/></filter>
+    <marker id="cA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
+    </marker>
+  </defs>
+  <text x="320" y="25" font-family="monospace" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">Clan Glory Bot — Exploit Flow</text>
+  <!-- Guest Auth -->
+  <rect x="20" y="50" width="140" height="55" rx="12" fill="url(#cG1)" filter="url(#cS)"/>
+  <text x="90" y="75" font-family="monospace" font-size="10" fill="white" text-anchor="middle" font-weight="bold">Guest Auth</text>
+  <text x="90" y="92" font-family="monospace" font-size="8" fill="white" text-anchor="middle">OAuth + JWT</text>
+  <!-- TCP Connect -->
+  <rect x="200" y="50" width="140" height="55" rx="12" fill="url(#cG2)" filter="url(#cS)"/>
+  <text x="270" y="75" font-family="monospace" font-size="10" fill="white" text-anchor="middle" font-weight="bold">TCP Connect</text>
+  <text x="270" y="92" font-family="monospace" font-size="8" fill="white" text-anchor="middle">4 sockets to game</text>
+  <!-- Join Clan -->
+  <rect x="380" y="50" width="140" height="55" rx="12" fill="url(#cG3)" filter="url(#cS)"/>
+  <text x="450" y="75" font-family="monospace" font-size="10" fill="white" text-anchor="middle" font-weight="bold">Join Clan</text>
+  <text x="450" y="92" font-family="monospace" font-size="8" fill="white" text-anchor="middle">All 4 guests</text>
+  <!-- Arrows top row -->
+  <line x1="160" y1="77" x2="195" y2="77" stroke="#666" stroke-width="2" marker-end="url(#cA)"/>
+  <line x1="340" y1="77" x2="375" y2="77" stroke="#666" stroke-width="2" marker-end="url(#cA)"/>
+  <!-- Form Squad -->
+  <rect x="380" y="140" width="140" height="55" rx="12" fill="url(#cG1)" filter="url(#cS)"/>
+  <text x="450" y="165" font-family="monospace" font-size="10" fill="white" text-anchor="middle" font-weight="bold">Form Squad</text>
+  <text x="450" y="182" font-family="monospace" font-size="8" fill="white" text-anchor="middle">Leader + invites</text>
+  <line x1="450" y1="105" x2="450" y2="135" stroke="#666" stroke-width="2" marker-end="url(#cA)"/>
+  <!-- Queue Match -->
+  <rect x="200" y="140" width="140" height="55" rx="12" fill="url(#cG2)" filter="url(#cS)"/>
+  <text x="270" y="165" font-family="monospace" font-size="10" fill="white" text-anchor="middle" font-weight="bold">Queue Match</text>
+  <text x="270" y="182" font-family="monospace" font-size="8" fill="white" text-anchor="middle">Clash Squad</text>
+  <line x1="380" y1="167" x2="345" y2="167" stroke="#666" stroke-width="2" marker-end="url(#cA)"/>
+  <!-- Exit Match -->
+  <rect x="20" y="140" width="140" height="55" rx="12" fill="url(#cG3)" filter="url(#cS)"/>
+  <text x="90" y="165" font-family="monospace" font-size="10" fill="white" text-anchor="middle" font-weight="bold">Exit Match</text>
+  <text x="90" y="182" font-family="monospace" font-size="8" fill="white" text-anchor="middle">All withdraw</text>
+  <line x1="200" y1="167" x2="165" y2="167" stroke="#666" stroke-width="2" marker-end="url(#cA)"/>
+  <!-- Glory Points -->
+  <rect x="200" y="225" width="240" height="45" rx="12" fill="url(#cG4)" filter="url(#cS)"/>
+  <text x="320" y="252" font-family="monospace" font-size="12" fill="white" text-anchor="middle" font-weight="bold">Glory Points Credited</text>
+  <line x1="90" y1="195" x2="270" y2="220" stroke="#666" stroke-width="1.5" marker-end="url(#cA)" stroke-dasharray="4,3"/>
+  <!-- Repeat -->
+  <rect x="200" y="290" width="240" height="25" rx="8" fill="#2D2D2D" stroke="#a855f7" stroke-width="1"/>
+  <text x="320" y="307" font-family="monospace" font-size="10" fill="#a855f7" text-anchor="middle" font-weight="bold">Re-queue (repeat cycle)</text>
+  <line x1="320" y1="270" x2="320" y2="285" stroke="#666" stroke-width="1.5" marker-end="url(#cA)"/>
+</svg>

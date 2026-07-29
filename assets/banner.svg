@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="160" viewBox="0 0 680 160">
+  <defs>
+    <linearGradient id="clanBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="50%" style="stop-color:#1e293b"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="clanAccent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#a855f7"/>
+      <stop offset="100%" style="stop-color:#ec4899"/>
+    </linearGradient>
+    <filter id="clanGlow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="680" height="160" rx="25" fill="url(#clanBg)"/>
+  <rect x="0" y="0" width="680" height="5" rx="2" fill="url(#clanAccent)"/>
+  <text x="340" y="65" font-family="monospace" font-size="28" font-weight="bold" fill="url(#clanAccent)" text-anchor="middle" filter="url(#clanGlow)">Clan Glory Bot</text>
+  <text x="340" y="98" font-family="monospace" font-size="14" fill="#94a3b8" text-anchor="middle">Free Fire Clash Squad Automation | TCP | Protobuf | AES-256</text>
+  <circle cx="60" cy="40" r="6" fill="#a855f7" opacity="0.5">
+    <animate attributeName="opacity" values="0.5;0.9;0.5" dur="2s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="620" cy="120" r="5" fill="#ec4899" opacity="0.4">
+    <animate attributeName="opacity" values="0.4;0.8;0.4" dur="1.5s" repeatCount="indefinite"/>
+  </circle>
+  <text x="340" y="135" font-family="monospace" font-size="11" fill="#64748b" text-anchor="middle">v2.0.0 | by ISMAILdz13</text>
+</svg>
