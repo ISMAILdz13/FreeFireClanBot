@@ -261,7 +261,7 @@ async def GenJoinSquadsPacket(code,  K , V):
     fields[2][9] = {}
     fields[2][9][2] = 800
     fields[2][9][6] = 11
-    fields[2][9][8] = "1.111.1"
+    fields[2][9][8] = "1.126.2"
     fields[2][9][9] = 5
     fields[2][9][10] = 1
     return await GeneRaTePk((await CrEaTe_ProTo(fields)).hex() , '0515' , K , V)   
@@ -481,7 +481,7 @@ async def GeneRaTePk(Pk , N , K , V):
     else: print('ErroR => GeneRatinG ThE PacKeT !! ')
     return bytes.fromhex(HeadEr + _ + PkEnc)
 async def OpEnSq(K , V,region):
-    fields = {1: 1, 2: {2: "\u0001", 3: 1, 4: 1, 5: "en", 9: 1, 11: 1, 13: 1, 14: {2: 5756, 6: 11, 8: "1.111.5", 9: 2, 10: 4}}}
+    fields = {1: 1, 2: {2: "\u0001", 3: 1, 4: 1, 5: "en", 9: 1, 11: 1, 13: 1, 14: {2: 5756, 6: 11, 8: "1.126.2", 9: 2, 10: 4}}}
     if region.lower() == "ind":
         packet = '0514'
     elif region.lower() == "bd":

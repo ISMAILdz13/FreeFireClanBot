@@ -312,7 +312,7 @@ async def join_teamcode_packet(team_code, key, iv, region):
             9: {
                 2: 800,
                 6: 11,
-                8: "1.111.1",
+                8: "1.126.2",
                 9: 5,
                 10: 1
             }
@@ -4948,7 +4948,7 @@ async def ArohiAccepted(uid,code,K,V):
             2: 161,
             4: "y[WW",
             6: 11,
-            8: "1.114.18",
+            8: "1.126.2",
             9: 3,
             10: 1
             },

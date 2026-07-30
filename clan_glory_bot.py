@@ -56,7 +56,7 @@ from Crypto.Util.Padding import pad, unpad
 from Pb2 import MajoRLoGinrEq_pb2, MajoRLoGinrEs_pb2, PorTs_pb2
 from xC4 import (
     CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
-    AuthClan, OpEnSq, AutH_GlobAl, ExiT, cHSq,
+    AuthClan, OpEnSq, AutH_GlobAl, ExiT,
     DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
     EnC_PacKeT, EnC_Uid, EnC_Vr, SEnd_InV,
 )
@@ -96,7 +96,7 @@ def get_packet_type(region: str) -> str:
 # ======================== HTTP API ========================
 
 HTTP_HEADERS = {
-    'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 11; ASUS_Z01QD Build/PI)",
+    'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 11; SM-A145F Build/RP1A.200720.012)",
     'Connection': "Keep-Alive", 'Accept-Encoding': "gzip",
     'Content-Type': "application/octet-stream", 'Expect': "100-continue",
     'X-Unity-Version': "2018.4.11f1", 'X-GA': "v1 1", 'ReleaseVersion': "OB54",
@@ -256,7 +256,7 @@ async def auto_join_clan(session: aiohttp.ClientSession, jwt: str, clan_id: int,
     headers = {
         "Authorization": f"Bearer {jwt}",
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; ASUS_Z01QD Build/PI)",
+        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM-A145F Build/RP1A.200720.012)",
         "X-Unity-Version": "2018.4.11f1",
         "X-GA": "v1 1",
         "ReleaseVersion": "OB54",
@@ -466,11 +466,10 @@ class GuestConnection:
         self.squad_code = None
         self.team_code = None
 
-    async def open_squad(self, region: str, squad_size: int = 4) -> dict:
+    async def open_squad(self, region: str) -> dict:
         """OpEnSq — leader opens squad for matchmaking.
-        Uses custom fields with squad_size to set the number of additional member slots.
-        We use 3 extra slots (4 total) for safety — Clash Squad is 4v4 anyway."""
-        extra_slots = 3  # Always 3 extra slots (4 total = leader + 3) — Clash Squad standard
+        Creates 4 total slots (leader + 3) — Clash Squad is 4v4 standard."""
+        extra_slots = 3  # 3 extra slots = 4 total (Clash Squad 4v4 standard)
         fields = {
             1: 1,
             2: {
@@ -481,7 +480,7 @@ class GuestConnection:
                 9: 1,
                 11: 1,
                 13: 1,
-                14: {2: 5756, 6: 11, 8: "1.111.5", 9: 2, 10: 4}
+                14: {2: 5756, 6: 11, 8: "1.126.2", 9: 2, 10: 4}
             }
         }
         proto_bytes = await CrEaTe_ProTo(fields)
@@ -727,7 +726,7 @@ class GuestConnection:
                 9: "FFD58FB4F76F648C2A5E21EBCFA3AAE81B4C9B7D97",
                 10: "voice", 11: "V2059", 12: "mt6785",
                 13: "AFFD58FB4F76F648C2A5E21EBCFA3AAE81B4C9B7D97",
-                14: f"{self.region}_1999120752610979840",
+                14: f"{self.region.upper()}_1999120752610979840",
                 15: 269
             }
         }
@@ -748,27 +747,6 @@ class GuestConnection:
         pkt_basic = await GeneRaTePk((await CrEaTe_ProTo(fields_basic)).hex(), pkt_type, self.key, self.iv)
         await self.send_packet(pkt_basic, channel="online")
         print(f"  [G{self.index+1}] LEADER start (field=9, basic) sent!")
-
-    async def listen_for_responses(self, duration: float) -> list:
-        """Listen for server responses during spam period. Catches match-found packets."""
-        responses = []
-        end_time = time.time() + duration
-        while time.time() < end_time and self.connected:
-            try:
-                data = await asyncio.wait_for(self.online_reader.read(9999), timeout=1.0)
-                if data:
-                    hex_str = data.hex()
-                    responses.append({
-                        'guest': self.index + 1,
-                        'hex': hex_str,
-                        'hex_len': len(hex_str),
-                        'header': hex_str[:12]
-                    })
-            except asyncio.TimeoutError:
-                continue
-            except Exception:
-                break
-        return responses
 
     async def spam_start_match(self, duration: float, delay: float):
         """Members spam 'I'm ready' packets (field 1=9) on the ONLINE socket.
@@ -907,13 +885,12 @@ class ClanGloryBot:
         await asyncio.sleep(1)
 
         # Step 2: Leader opens squad
-        leader_response = await leader.open_squad(self.region, squad_size=len(self.connections))
-        await asyncio.sleep(2)
+        leader_response = await leader.open_squad(self.region)
 
         # No cHSq — it was inconsistent (sometimes 3/3, sometimes 2/3)
         # Instead, OpEnSq field 2.3 = 3 creates 4 total slots (leader + 3)
         # Even if one slot is wasted, 2 members can still join reliably
-        await asyncio.sleep(2)  # Wait for server to register the 4-slot squad
+        await asyncio.sleep(3)  # Wait for server to register the 4-slot squad
 
         team_code = leader_response.get("team_code")
         chat_code = leader_response.get("chat_code")
@@ -1007,7 +984,7 @@ class ClanGloryBot:
         # LEADER sends the actual start-match packet (field 1=269, detailed)
         leader = self.connections[0]
         if leader.connected:
-            print(f"  >> LEADER starting match (field 1=269, detailed device info)...")
+            print(f"  >> LEADER starting match (3 packet types: 269+214+9)...")
             await leader.start_match_leader()
             await asyncio.sleep(1)
 
@@ -1029,7 +1006,7 @@ class ClanGloryBot:
             all_data = b""
             try:
                 while True:
-                    resp = await asyncio.wait_for(conn.online_reader.read(99999), timeout=5.0)
+                    resp = await asyncio.wait_for(conn.online_reader.read(9999), timeout=5.0)
                     if resp:
                         all_data += resp
                         print(f"  [G{conn.index+1}] Received: {len(resp.hex())} hex (total: {len(all_data.hex())})")
@@ -1081,7 +1058,7 @@ class ClanGloryBot:
                         continue
             else:
                 print(f"  [G{conn.index+1}] Post-match: no data (timeout)")
-        await asyncio.sleep(max(0, MATCH_WAIT - 3))
+        await asyncio.sleep(max(0, MATCH_WAIT - 5))
 
         print(f"  >> Leaving team...")
         for conn in self.connections:
@@ -1095,9 +1072,10 @@ class ClanGloryBot:
         print(f"  >> Waiting {CYCLE_DELAY}s before next cycle...")
         await asyncio.sleep(CYCLE_DELAY)
 
+        # NOTE: This is an ESTIMATE only — actual glory depends on match completion
         glory_per_cycle = len(self.connections) * random.randint(5, 15)
         self.total_glory_estimated += glory_per_cycle
-        print(f"  >> Cycle #{self.cycle_count} done (+~{glory_per_cycle} glory, total ~{self.total_glory_estimated})")
+        print(f"  >> Cycle #{self.cycle_count} done (est +~{glory_per_cycle} glory, running total ~{self.total_glory_estimated})")
         return True
 
     async def run(self):
