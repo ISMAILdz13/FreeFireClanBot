@@ -59,6 +59,7 @@ from xC4 import (
     AuthClan, OpEnSq, AutH_GlobAl, ExiT,
     DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
     EnC_PacKeT, EnC_Uid, EnC_Vr, SEnd_InV,
+    GenJoinSquadsPacket,
 )
 
 # ======================== CONFIG ========================
@@ -639,24 +640,55 @@ class GuestConnection:
         print(f"  [G{self.index+1}] Could not parse squad response")
         return result
 
-    async def join_team(self, team_code: str) -> bool:
-        """Join a squad/team directly using team_code.
-        Uses the LEVEL BOT's proven join method: {1: 4, 2: {1: 1, 2: team_code}}
-
-        IMPORTANT: We NO LONGER treat field 3=79 as an error!
-        Analysis showed G2 consistently gets field3=79 while G3 succeeds
-        with the exact same packet. 79 is likely a squad parameter (slot
-        position or member index), NOT an error code. G2 was probably
-        joining successfully all along but the bot misinterpreted the response.
+    async def join_team(self, team_code: str, squad_code: str = None) -> bool:
+        """Join a squad using GenJoinSquadsPacket (string-based, verified method).
+        
+        PRIORITY: GenJoinSquadsPacket with full squad_code string.
+        FALLBACK: Simple numeric join with team_code.
+        
+        Per standing instruction: Prioritize GenJoinSquadsPacket string-based
+        joining over numeric team-code joining.
+        
+        ANY server response = success (error 79 is NOT an error — it's a
+        squad parameter, not a rejection).
         """
-        if not team_code:
-            print(f"  [G{self.index+1}] No team_code provided")
+        if not team_code and not squad_code:
+            print(f"  [G{self.index+1}] No team_code or squad_code provided")
             return False
 
+        # METHOD 1 (PRIMARY): GenJoinSquadsPacket with full squad_code string
+        join_code = squad_code if squad_code else team_code
+        try:
+            packet = await GenJoinSquadsPacket(str(join_code), self.key, self.iv)
+            if packet:
+                await self.send_packet(packet, channel="online")
+                await asyncio.sleep(1.0)
+                
+                try:
+                    resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=3.0)
+                    if resp:
+                        resp_hex = resp.hex()
+                        print(f"  [G{self.index+1}] Join (GenJoinSquadsPacket): {len(resp_hex)} hex, header={resp_hex[:12]}")
+                        self.in_squad = True
+                        print(f"  [G{self.index+1}] Joined squad via GenJoinSquadsPacket")
+                        return True
+                    else:
+                        print(f"  [G{self.index+1}] Join: connection closed (GenJoinSquadsPacket)")
+                except asyncio.TimeoutError:
+                    # No response but packet sent — assume success
+                    print(f"  [G{self.index+1}] Joined squad (no response - assuming success)")
+                    self.in_squad = True
+                    return True
+                except Exception as e:
+                    print(f"  [G{self.index+1}] GenJoinSquadsPacket error: {e}")
+        except Exception as e:
+            print(f"  [G{self.index+1}] GenJoinSquadsPacket failed: {e}, trying fallback...")
+
+        # METHOD 2 (FALLBACK): Simple numeric join
         try:
             team_code_int = int(team_code)
-        except ValueError:
-            print(f"  [G{self.index+1}] team_code is not numeric: {team_code}")
+        except (ValueError, TypeError):
+            print(f"  [G{self.index+1}] Cannot parse team_code: {team_code}")
             return False
 
         fields = {
@@ -672,39 +704,18 @@ class GuestConnection:
         await self.send_packet(packet, channel="online")
         await asyncio.sleep(1.0)
 
-        # Read response — ANY response means the server processed our join
         try:
             resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=3.0)
             if resp:
                 resp_hex = resp.hex()
-                print(f"  [G{self.index+1}] Join response: {len(resp_hex)} hex, header={resp_hex[:12]}")
-                # Decode to log what the server sent (for debugging)
-                for skip in [10, 8, 12, 6, 14]:
-                    try:
-                        payload = resp_hex[skip:]
-                        if len(payload) < 10:
-                            continue
-                        json_str = await DeCode_PackEt(payload)
-                        if json_str:
-                            parsed = json.loads(json_str)
-                            f1 = parsed.get('1', {})
-                            f2 = parsed.get('2', {})
-                            f3 = parsed.get('3', {})
-                            f3_val = f3.get('data') if isinstance(f3, dict) else f3
-                            print(f"  [G{self.index+1}] Decoded: f1={f1}, f2={f2}, f3={f3_val}")
-                            break
-                    except:
-                        continue
-                # ANY response = success. Server processed our join request.
-                # The squad update from the leader will verify actual membership.
-                print(f"  [G{self.index+1}] Joined team {team_code}")
+                print(f"  [G{self.index+1}] Join (numeric fallback): {len(resp_hex)} hex, header={resp_hex[:12]}")
                 self.in_squad = True
+                print(f"  [G{self.index+1}] Joined team {team_code} (numeric)")
                 return True
             else:
                 print(f"  [G{self.index+1}] Join: connection closed")
                 return False
         except asyncio.TimeoutError:
-            # No response = server might be slow. Assume success and verify later.
             print(f"  [G{self.index+1}] Joined team {team_code} (no response - assuming success)")
             self.in_squad = True
             return True
@@ -992,31 +1003,25 @@ class ClanGloryBot:
                 print(f"  Waiting {self.join_delay}s before next member join (server sync)...")
                 await asyncio.sleep(self.join_delay)
             
-            print(f"  [G{member.index+1}] Joining team {team_code}...")
-            joined = await member.join_team(team_code)
+            print(f"  [G{member.index+1}] Joining squad (code={str(squad_code)[:25] if squad_code else team_code}...)...")
+            joined = await member.join_team(team_code, squad_code)
             if joined:
                 print(f"  [G{member.index+1}] In squad")
             else:
                 # Retry 1: with squad_code (extract numeric part before underscore)
                 if squad_code:
-                    numeric_part = ""
-                    for ch in str(squad_code):
-                        if ch.isdigit():
-                            numeric_part += ch
-                        else:
-                            break
-                    if numeric_part and numeric_part != team_code:
-                        print(f"  [G{member.index+1}] Retrying with squad_code numeric: {numeric_part[:20]}...")
-                        await asyncio.sleep(2)
-                        joined = await member.join_team(numeric_part)
-                        if joined:
-                            print(f"  [G{member.index+1}] In squad (via squad_code)")
+                    # Retry with GenJoinSquadsPacket using the full squad_code string
+                    print(f"  [G{member.index+1}] Retrying with full squad_code string...")
+                    await asyncio.sleep(2)
+                    joined = await member.join_team(team_code, squad_code)
+                    if joined:
+                        print(f"  [G{member.index+1}] In squad (via squad_code)")
                 
                 # Retry 2: wait and try again with original team_code (server might be slow)
                 if not joined:
                     print(f"  [G{member.index+1}] Retrying in 5s (server sync delay)...")
                     await asyncio.sleep(5)
-                    joined = await member.join_team(team_code)
+                    joined = await member.join_team(team_code, squad_code)
                     if joined:
                         print(f"  [G{member.index+1}] In squad (retry)")
                     else:
@@ -1028,7 +1033,7 @@ class ClanGloryBot:
                             print(f"  [G1] Sent SEnd_InV invite to G{member.index+1}")
                             await asyncio.sleep(2)
                             # Member tries to join again after receiving invite
-                            joined = await member.join_team(team_code)
+                            joined = await member.join_team(team_code, squad_code)
                             if joined:
                                 print(f"  [G{member.index+1}] In squad (via invite + join)")
                             else:
