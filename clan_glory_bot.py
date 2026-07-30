@@ -1475,6 +1475,8 @@ class ClanGloryBot:
             print("  Setup FAILED")
             return
 
+        start_time = time.time()
+
         if getattr(self, 'dry_run', False):
             print("\n  === DRY RUN COMPLETE ===")
             print(f"  All {len(self.connections)} guests authenticated and connected.")
@@ -1483,8 +1485,6 @@ class ClanGloryBot:
                 print(f"  [G{conn.index+1}] uid={conn.account_uid}, {status}")
             await self.cleanup_connections()
             return
-
-        start_time = time.time()
 
         # Check initial clan glory
         print("\n  === Clan Glory Check (Before) ===")
