@@ -180,14 +180,16 @@ async def build_major_login(open_id: str, access_token: str) -> bytes:
     return enc
 
 
-async def get_login_data(jwt: str, server_url: str, access_token: str) -> dict:
-    """GetLoginData — POST to {server_url}/GetLoginData to get TCP endpoints.
-    Returns: online_ip, online_port, chat_ip, chat_port, clan_compiled_data, account_name."""
+async def get_login_data(major_login_payload: bytes, server_url: str, jwt_token: str) -> dict:
+    """GetLoginData — POST to {server_url}/GetLoginData with the MajorLogin encrypted payload.
+    Returns: online_ip, online_port, chat_ip, chat_port, clan_compiled_data, account_name.
+    NOTE: The body is the SAME encrypted MajorLogin payload (not the JWT token).
+    The Authorization header uses the JWT token from MajorLogin response (not the OAuth access token)."""
     try:
         url = f"{server_url}/GetLoginData"
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=jwt, headers={
-                **HTTP_HEADERS, "Authorization": f"Bearer {access_token}"
+            async with session.post(url, data=major_login_payload, headers={
+                **HTTP_HEADERS, "Authorization": f"Bearer {jwt_token}"
             }, ssl=False, timeout=aiohttp.ClientTimeout(total=20)) as r:
                 if r.status == 200:
                     data = await r.read()
@@ -202,6 +204,9 @@ async def get_login_data(jwt: str, server_url: str, access_token: str) -> dict:
                         "account_uid": proto.AccountUID,
                     }
                     return result
+                else:
+                    body = await r.text()
+                    print(f"  GetLoginData HTTP {r.status}: {body[:100]}")
     except Exception as e:
         print(f"  GetLoginData error: {e}")
     return {}
@@ -314,7 +319,9 @@ class GuestConnection:
             return False
 
         # Step 3: GetLoginData — get TCP endpoints + clan compiled data
-        login_data = await get_login_data(self.jwt, self.server_url, at)
+        # NOTE: Send the MajorLogin encrypted payload as the body,
+        #       and use the JWT token (not OAuth access token) for Bearer auth
+        login_data = await get_login_data(payload, self.server_url, self.jwt)
         if not login_data:
             print(f"  [G{self.index+1}] GetLoginData FAIL")
             return False
