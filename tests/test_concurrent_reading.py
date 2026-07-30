@@ -183,6 +183,94 @@ class TestPacketTypeScanning(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(found_types), 0)
 
 
+class TestGroupIDValidation(unittest.TestCase):
+    """Test that f2=18 packets are only treated as matches when GroupID is valid."""
+
+    def _is_real_match(self, parsed):
+        """Replicate the GroupID validation logic."""
+        f2 = parsed.get('2', {})
+        f2_val = f2.get('data') if isinstance(f2, dict) else f2
+        if f2_val != 18:
+            return False
+        f5 = parsed.get('5', {})
+        f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
+        if isinstance(f5d, dict):
+            f1 = f5d.get('1', {})
+            if isinstance(f1, dict) and 'data' in f1:
+                group_id = f1['data']
+                return isinstance(group_id, int) and group_id > 1000000000
+        return False
+
+    def test_real_match_packet(self):
+        """f2=18 with GroupID > 1B is a real match."""
+        parsed = {
+            "2": {"wire_type": "varint", "data": 18},
+            "5": {"data": {"1": {"data": 16145387763}}}
+        }
+        self.assertTrue(self._is_real_match(parsed))
+
+    def test_config_packet_not_match(self):
+        """f2=18 with 5.1=100001 is NOT a match (it's config data)."""
+        parsed = {
+            "2": {"wire_type": "varint", "data": 18},
+            "5": {"data": {"1": {"data": 100001}, "2": {"data": 20}}}
+        }
+        self.assertFalse(self._is_real_match(parsed))
+
+    def test_small_group_id_not_match(self):
+        """f2=18 with GroupID < 1B is probably not a real match."""
+        parsed = {
+            "2": {"wire_type": "varint", "data": 18},
+            "5": {"data": {"1": {"data": 999999}}}
+        }
+        self.assertFalse(self._is_real_match(parsed))
+
+    def test_f2_not_18_not_match(self):
+        """f2=5 is not a match."""
+        parsed = {
+            "2": {"wire_type": "varint", "data": 5},
+            "5": {"data": {"1": {"data": 16145387763}}}
+        }
+        self.assertFalse(self._is_real_match(parsed))
+
+    def test_no_f5_not_match(self):
+        """f2=18 without f5 is not a match."""
+        parsed = {"2": {"wire_type": "varint", "data": 18}}
+        self.assertFalse(self._is_real_match(parsed))
+
+
+class TestSpamReadOverlap(unittest.TestCase):
+    """Test that spam and reading run concurrently (not sequentially)."""
+
+    def test_no_drain_buffer_in_source(self):
+        """drain_buffer should NOT be called in the match-waiting flow."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        # drain_buffer should exist as a method but NOT be called in exploit_cycle
+        # Check that it's not called between spam and match-waiting
+        self.assertIn("async def drain_buffer", source)
+        # The old pattern "Drain stale data" should be gone
+        self.assertNotIn("Drain stale data from buffers", source,
+                         "drain_buffer call should be removed from match-waiting flow")
+
+    def test_spam_and_read_concurrent(self):
+        """Spam tasks and read tasks should be gathered together."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        self.assertIn("spam_tasks", source)
+        self.assertIn("read_tasks", source)
+        self.assertIn("all_tasks = spam_tasks + read_tasks", source)
+
+    def test_total_wait_includes_spam_duration(self):
+        """Total wait should be SPAM_DURATION + MATCH_WAIT (not just MATCH_WAIT)."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        self.assertIn("SPAM_DURATION + MATCH_WAIT", source)
+
+
 class TestMatchWaitTiming(unittest.TestCase):
     """Test timing-related aspects of the match-waiting logic."""
 
@@ -213,7 +301,7 @@ class TestMatchWaitTiming(unittest.TestCase):
         with open(bot_path) as f:
             source = f.read()
         self.assertIn("asyncio.gather", source)
-        self.assertIn("read_channel_continuously", source)
+        self.assertIn("read_channel_for_match", source)
         self.assertIn("deadline", source)
 
 

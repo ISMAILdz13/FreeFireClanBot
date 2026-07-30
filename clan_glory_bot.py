@@ -1198,70 +1198,107 @@ class ClanGloryBot:
         total_packets = sum(r for r in results if isinstance(r, int))
         print(f"  >> Sent {total_packets} start-match packets total")
 
-        # Read match data
-        # Drain stale data from buffers before reading match results
+        # CONCURRENT SPAM + READ (same as exploit_cycle — no drain_buffer!)
+        total_wait = SPAM_DURATION + MATCH_WAIT
+        deadline = asyncio.get_event_loop().time() + total_wait
+        
+        async def read_solo_match(conn, channel_name, reader, deadline):
+            """Read for match packets in solo mode."""
+            label = f"G{conn.index+1}/{channel_name}"
+            while asyncio.get_event_loop().time() < deadline:
+                if conn.match_found:
+                    break
+                try:
+                    resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
+                    if not resp:
+                        continue
+                    resp_hex = resp.hex()
+                    if len(resp_hex) > 40:
+                        print(f"  [{label}] DATA: {len(resp_hex)} hex, header={resp_hex[:16]}")
+                    for skip in [10, 8, 12, 6, 4, 0, 14, 16, 18, 20, 2, 22, 24]:
+                        try:
+                            payload = resp_hex[skip:]
+                            if len(payload) < 20:
+                                continue
+                            json_str = await DeCode_PackEt(payload)
+                            if not json_str:
+                                continue
+                            parsed = json.loads(json_str)
+                            f2 = parsed.get('2', {})
+                            f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                            if not isinstance(f2_val, int) or f2_val < 1:
+                                continue
+                            if f2_val == 18 and not conn.match_found:
+                                f5 = parsed.get('5', {})
+                                f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
+                                group_id = None
+                                if isinstance(f5d, dict):
+                                    f1_5 = f5d.get('1', {})
+                                    if isinstance(f1_5, dict) and 'data' in f1_5:
+                                        group_id = f1_5['data']
+                                if group_id and isinstance(group_id, int) and group_id > 1000000000:
+                                    print(f"  [{label}] MATCH FOUND! f2=18, GroupID={group_id}")
+                                    conn.match_found = True
+                                    conn.match_data = parsed
+                                    for k in sorted(f5d.keys())[:15]:
+                                        v = f5d[k]
+                                        if isinstance(v, dict) and 'data' in v:
+                                            print(f"    5.{k} = {str(v['data'])[:150]}")
+                                    print(f"  *** MATCH PACKET (f2=18) for G{conn.index+1}! ***")
+                                    await conn.join_match(group_id)
+                            break
+                        except:
+                            continue
+                except asyncio.TimeoutError:
+                    continue
+                except:
+                    break
+            if not conn.match_found:
+                print(f"  [{label}] no match packet found")
+        
+        # Start spam + reads concurrently
+        spam_tasks = []
         for conn in self.connections:
             if conn.connected:
-                await conn.drain_buffer("online", 0.5)
-                await conn.drain_buffer("chat", 0.5)
-
-        # Drain stale data from buffers before reading match results
-        for conn in self.connections:
-            if conn.connected:
-                await conn.drain_buffer("online", 0.5)
-                await conn.drain_buffer("chat", 0.5)
-
-        print(f"  >> Waiting {MATCH_WAIT}s for match completion...")
+                spam_tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
+        
+        read_tasks = []
         for conn in self.connections:
             if not conn.connected:
                 continue
-            for channel_name, reader in [("online", conn.online_reader), ("chat", conn.chat_reader)]:
-                all_data = b""
-                try:
-                    while True:
-                        resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
-                        if resp:
-                            all_data += resp
-                        else:
-                            break
-                except asyncio.TimeoutError:
-                    pass
-                except Exception:
-                    pass
-                if not all_data:
-                    continue
-                resp_hex = all_data.hex()
-                print(f"  [G{conn.index+1}] {channel_name}: {len(resp_hex)} hex, header={resp_hex[:16]}")
-                for skip in range(0, min(32, len(resp_hex)), 2):
-                    try:
-                        payload = resp_hex[skip:]
-                        if len(payload) < 20:
-                            continue
-                        json_str = await DeCode_PackEt(payload)
-                        if not json_str:
-                            continue
-                        parsed = json.loads(json_str)
-                        f2 = parsed.get('2', {})
-                        f2_val = f2.get('data') if isinstance(f2, dict) else f2
-                        if not isinstance(f2_val, int) or f2_val < 1:
-                            continue
-                        f1 = parsed.get('1', {})
-                        f1_val = f1.get('data') if isinstance(f1, dict) else f1
-                        f5 = parsed.get('5', {})
-                        f5_summary = ""
-                        if isinstance(f5, dict) and 'data' in f5:
-                            f5d = f5['data']
-                            if isinstance(f5d, dict):
-                                f5_summary = str({k: (v.get('data') if isinstance(v, dict) else v) for k, v in list(f5d.items())[:8]})[:150]
-                        print(f"  [G{conn.index+1}] {channel_name} f2={f2_val}, f1={f1_val}, f5={f5_summary}")
-                        break
-                    except:
-                        continue
+            read_tasks.append(read_solo_match(conn, "online", conn.online_reader, deadline))
+            read_tasks.append(read_solo_match(conn, "chat", conn.chat_reader, deadline))
+        
+        all_tasks = spam_tasks + read_tasks
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        total_packets = sum(r for r in results[:len(spam_tasks)] if isinstance(r, int))
+        print(f"  >> Sent {total_packets} start-match packets total")
+        
+        # Share GroupID
+        match_finders = [c for c in self.connections if c.match_found and c.match_data]
+        if match_finders:
+            for finder in match_finders:
+                f5 = finder.match_data.get('5', {})
+                f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
+                shared_group_id = None
+                if isinstance(f5d, dict):
+                    f1 = f5d.get('1', {})
+                    if isinstance(f1, dict) and 'data' in f1:
+                        shared_group_id = f1['data']
+                if shared_group_id:
+                    for other in self.connections:
+                        if other.index != finder.index and not other.match_found and other.connected:
+                            print(f"  [G{other.index+1}] Joining match (shared by G{finder.index+1}, GroupID={shared_group_id})...")
+                            await other.join_match(shared_group_id)
+                            other.match_found = True
+        
+        if not match_finders:
+            print(f"  >> No matches found this cycle")
 
-        await asyncio.sleep(max(0, MATCH_WAIT - 5))
         glory_per_cycle = len(self.connections) * random.randint(5, 15)
         self.total_glory_estimated += glory_per_cycle
-        print(f"  >> Cycle #{self.cycle_count} done (est +~{glory_per_cycle} glory, total ~{self.total_glory_estimated})")
+        matches_count = sum(1 for c in self.connections if c.match_found)
+        print(f"  >> Cycle #{self.cycle_count} done (matches: {matches_count}/{len(self.connections)}, est +~{glory_per_cycle} glory, total ~{self.total_glory_estimated})")
         return True
 
     async def exploit_cycle(self) -> bool:
@@ -1276,37 +1313,28 @@ class ClanGloryBot:
             await leader.start_match_leader()
             await asyncio.sleep(1)
 
-        # ALL members (including leader) spam 'I'm ready' (field 1=9)
-        print(f"  >> Spamming ready packets (field 1=9) for {SPAM_DURATION}s...")
-        tasks = []
-        for conn in self.connections:
-            if conn.connected:
-                tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        total_packets = sum(r for r in results if isinstance(r, int))
-        print(f"  >> Sent {total_packets} ready packets total")
-
-        # Drain stale data from buffers before reading match results
-        for conn in self.connections:
-            if conn.connected:
-                await conn.drain_buffer("online", 0.5)
-                await conn.drain_buffer("chat", 0.5)
-
-        print(f"  >> Waiting {MATCH_WAIT}s for match (reading ALL channels concurrently)...")
+        # CONCURRENT SPAM + READ: spam start-match while reading for match packets
+        # This catches match packets that arrive DURING the spam (server responds fast)
+        total_wait = SPAM_DURATION + MATCH_WAIT  # 18 + 60 = 78s total
+        deadline = asyncio.get_event_loop().time() + total_wait
         
-        async def read_channel_continuously(conn, channel_name, reader, deadline):
-            """Continuously read from a channel until deadline, processing match packets in real-time."""
+        async def read_channel_for_match(conn, channel_name, reader, deadline):
+            """Read from a channel until match found or deadline. Process ALL data for f2=18."""
             label = f"G{conn.index+1}/{channel_name}"
             while asyncio.get_event_loop().time() < deadline:
+                if conn.match_found:
+                    break  # Stop reading once match is found
                 try:
                     resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
                     if not resp:
                         continue
                     resp_hex = resp.hex()
-                    print(f"  [{label}] DATA: {len(resp_hex)} hex, header={resp_hex[:16]}")
+                    # Only log if it's substantial data (skip tiny keepalive packets)
+                    if len(resp_hex) > 40:
+                        print(f"  [{label}] DATA: {len(resp_hex)} hex, header={resp_hex[:16]}")
                     
-                    # Try to decode and find match packets
-                    for skip in [10, 8, 12, 6, 4, 0, 14, 16, 18, 20]:
+                    # Try to decode at multiple offsets for match packets
+                    for skip in [10, 8, 12, 6, 4, 0, 14, 16, 18, 20, 2, 22, 24]:
                         try:
                             payload = resp_hex[skip:]
                             if len(payload) < 20:
@@ -1320,29 +1348,31 @@ class ClanGloryBot:
                             if not isinstance(f2_val, int) or f2_val < 1:
                                 continue
                             
-                            print(f"  [{label}] f2={f2_val}", end="")
                             f1 = parsed.get('1', {})
                             f1_val = f1.get('data') if isinstance(f1, dict) else f1
-                            print(f", f1={f1_val}")
                             
+                            # Check for match-found packet (f2=18 with GroupID in f5.1)
                             if f2_val == 18 and not conn.match_found:
-                                print(f"  *** MATCH PACKET FOUND (f2=18) for G{conn.index+1}! ***")
-                                conn.match_found = True
-                                conn.match_data = parsed
-                                # Deep decode f5
                                 f5 = parsed.get('5', {})
                                 f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
                                 group_id = None
                                 if isinstance(f5d, dict):
-                                    f1 = f5d.get('1', {})
-                                    if isinstance(f1, dict) and 'data' in f1:
-                                        group_id = f1['data']
+                                    f1_5 = f5d.get('1', {})
+                                    if isinstance(f1_5, dict) and 'data' in f1_5:
+                                        group_id = f1_5['data']
+                                
+                                # Only treat as match packet if GroupID is present and looks like a room ID
+                                # (not a config packet like 5.1=100001)
+                                if group_id and isinstance(group_id, int) and group_id > 1000000000:
+                                    print(f"  [{label}] MATCH FOUND! f2=18, GroupID={group_id}")
+                                    conn.match_found = True
+                                    conn.match_data = parsed
                                     # Print key match info
                                     for k in sorted(f5d.keys())[:15]:
                                         v = f5d[k]
                                         if isinstance(v, dict) and 'data' in v:
                                             print(f"    5.{k} = {str(v['data'])[:150]}")
-                                if group_id:
+                                    print(f"  *** MATCH PACKET (f2=18) for G{conn.index+1}! ***")
                                     print(f"  [G{conn.index+1}] Joining match room (GroupID={group_id})...")
                                     await conn.join_match(group_id)
                             break
@@ -1357,17 +1387,30 @@ class ClanGloryBot:
             if not conn.match_found:
                 print(f"  [{label}] no match packet found")
         
-        # Launch ALL reads concurrently
-        deadline = asyncio.get_event_loop().time() + MATCH_WAIT
-        tasks = []
+        # Start spam AND concurrent reading at the same time
+        print(f"  >> Spamming ready packets (field 1=9) for {SPAM_DURATION}s + reading {MATCH_WAIT}s...")
+        
+        # Spam tasks (all members spam start-match)
+        spam_tasks = []
+        for conn in self.connections:
+            if conn.connected:
+                spam_tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
+        
+        # Read tasks (all connections × all channels, running for full duration)
+        read_tasks = []
         for conn in self.connections:
             if not conn.connected:
                 continue
-            tasks.append(read_channel_continuously(conn, "online", conn.online_reader, deadline))
-            tasks.append(read_channel_continuously(conn, "chat", conn.chat_reader, deadline))
+            read_tasks.append(read_channel_for_match(conn, "online", conn.online_reader, deadline))
+            read_tasks.append(read_channel_for_match(conn, "chat", conn.chat_reader, deadline))
         
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        # Run spam and reads concurrently
+        all_tasks = spam_tasks + read_tasks
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        
+        # Count spam packets
+        total_packets = sum(r for r in results[:len(spam_tasks)] if isinstance(r, int))
+        print(f"  >> Sent {total_packets} ready packets total")
         
         # Share GroupID: if any connection found a match, make ALL connections join
         match_finders = [c for c in self.connections if c.match_found and c.match_data]
@@ -1389,6 +1432,8 @@ class ClanGloryBot:
         
         if not match_finders:
             print(f"  >> No matches found this cycle")
+        else:
+            print(f"  >> {len(match_finders)} match(es) found this cycle")
 
         print(f"  >> Leaving team...")
         for conn in self.connections:
