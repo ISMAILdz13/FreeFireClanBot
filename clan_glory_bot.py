@@ -94,6 +94,30 @@ DEFAULT_PACKET = "0515"
 
 GUESTS_FILE = os.path.join(BASE_DIR, "data", "guests.json")
 
+
+async def ArohiAccepted(uid, code, K, V):
+    """Accept squad invite — field 1=4, includes owner UID + code.
+    From TCP bot: field 2.1 = owner UID, 2.3 = owner UID, 2.10 = code."""
+    from xC4 import CrEaTe_ProTo, GeneRaTePk
+    fields = {
+        1: 4,
+        2: {
+            1: int(uid),
+            3: int(uid),
+            8: 1,
+            9: {
+                2: 161,
+                4: "y[WW",
+                6: 11,
+                8: "1.114.18",
+                9: 3,
+                10: 1,
+            },
+            10: str(code),
+        }
+    }
+    return await GeneRaTePk((await CrEaTe_ProTo(fields)).hex(), "0515", K, V)
+
 # ======================== HTTP API ========================
 
 HTTP_HEADERS = {
@@ -822,9 +846,11 @@ class ClanGloryBot:
                     print(f"  [G{member.index+1}] Reading invite packet...")
                     code = await member.read_invite_code(timeout=5.0)
                 if code:
-                    await member.join_squad(code)
+                    # Use ArohiAccepted (TCP bot's invite accept) — includes leader UID
+                    accept_packet = await ArohiAccepted(leader.account_uid, code, member.key, member.iv)
+                    await member.send_packet(accept_packet)
                     member.in_squad = True
-                    print(f"  [G{member.index+1}] Joined squad with code: {str(code)[:20]}...")
+                    print(f"  [G{member.index+1}] Accepted invite (code: {str(code)[:20]}...)")
                 else:
                     print(f"  [G{member.index+1}] No invite code — squad join may fail")
             except Exception as e:
