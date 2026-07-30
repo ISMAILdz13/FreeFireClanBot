@@ -541,6 +541,11 @@ class ClanGloryBot:
 
                 if not await conn.authenticate(session):
                     continue
+
+                # Auto-join target clan via HTTP API
+                await auto_join_clan(session, conn.jwt, self.clan_id, conn.server_url, i)
+                await asyncio.sleep(1)  # Wait for clan join to process
+
                 if not await conn.connect_tcp():
                     continue
 
