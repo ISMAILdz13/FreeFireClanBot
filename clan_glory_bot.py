@@ -825,42 +825,43 @@ class ClanGloryBot:
         self.total_glory_estimated = 0
 
     async def check_clan_glory(self, label: str = ""):
-        """Check clan glory via HTTP API."""
+        """Check clan glory by re-running GetLoginData and extracting clan_compiled_data.
+        We know GetLoginData works — it's what authenticate() uses.
+        The clan_compiled_data field contains clan info including glory."""
         try:
             conn = self.connections[0]
-            if not conn.jwt:
+            if not conn.jwt or not conn.access_token:
+                print(f"  [CLAN] {label}: no auth available")
                 return None
-            headers = {
-                "Authorization": f"Bearer {conn.jwt}",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM-A145F Build/RP1A.200720.012)",
-                "ReleaseVersion": "OB54",
-                "X-Unity-Version": "2018.4.11f1",
-            }
-            import urllib.parse
-            clan_payload = urllib.parse.urlencode({"clan_id": str(self.clan_id)}).encode()
-            async with aiohttp.ClientSession() as session:
-                for endpoint in [f"{conn.server_url}/GetClanInfo",
-                                 "https://clientbp.common.ggbluefox.com/GetClanInfo",
-                                 f"{conn.server_url}/GetGuildInfo"]:
-                    try:
-                        async with session.post(endpoint, data=clan_payload, headers=headers,
-                                               ssl=False, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                            if r.status == 200:
-                                data = await r.read()
-                                resp_hex = data.hex()
-                                print(f"  [CLAN] {label}: {len(resp_hex)} hex from {endpoint.split('/')[-1]}")
-                                json_str = await DeCode_PackEt(resp_hex)
-                                if json_str:
-                                    parsed = json.loads(json_str)
-                                    for k, v in sorted(parsed.items())[:15]:
-                                        if isinstance(v, dict) and 'data' in v:
-                                            print(f"  [CLAN] {label}: field {k} = {str(v['data'])[:100]}")
-                                    return parsed
-                    except:
-                        continue
+            # Re-build MajorLogin payload and call GetLoginData
+            payload = await build_major_login(conn.open_id, conn.access_token)
+            login_data = await get_login_data(payload, conn.server_url, conn.jwt)
+            if login_data:
+                ccd = login_data.get("clan_compiled_data", "")
+                if ccd:
+                    # Try to decode clan_compiled_data
+                    print(f"  [CLAN] {label}: clan_compiled_data = {len(str(ccd))} chars")
+                    # Try hex decode
+                    ccd_str = str(ccd)
+                    if all(c in '0123456789abcdef' for c in ccd_str[:20].lower()) and len(ccd_str) > 20:
+                        json_str = await DeCode_PackEt(ccd_str)
+                        if json_str:
+                            parsed = json.loads(json_str)
+                            print(f"  [CLAN] {label}: decoded clan data:")
+                            for k, v in sorted(parsed.items())[:20]:
+                                if isinstance(v, dict) and 'data' in v:
+                                    print(f"  [CLAN] {label}: field {k} = {str(v['data'])[:120]}")
+                        else:
+                            print(f"  [CLAN] {label}: clan data (hex, first 100): {ccd_str[:100]}")
+                    else:
+                        print(f"  [CLAN] {label}: clan data (first 100): {ccd_str[:100]}")
+                else:
+                    print(f"  [CLAN] {label}: no clan_compiled_data in response")
+                return login_data
+            else:
+                print(f"  [CLAN] {label}: GetLoginData returned empty")
         except Exception as e:
-            print(f"  [CLAN] Glory check error: {e}")
+            print(f"  [CLAN] {label}: error: {e}")
         return None
 
     async def setup(self) -> bool:
@@ -1095,7 +1096,7 @@ class ClanGloryBot:
                 all_data = b""
                 try:
                     while True:
-                        resp = await asyncio.wait_for(reader.read(65535), timeout=3.0)
+                        resp = await asyncio.wait_for(reader.read(65535), timeout=10.0)
                         if resp:
                             all_data += resp
                             print(f"  [G{conn.index+1}] {channel_name}: {len(resp.hex())} hex (total: {len(all_data.hex())})")
@@ -1203,6 +1204,47 @@ class ClanGloryBot:
                         break
                     except:
                         continue
+
+                # STRATEGY 2b: Scan ALL data for ALL packet types (not just f2=18)
+                print(f"  [G{conn.index+1}] {channel_name}: scanning ALL {len(resp_hex)} hex for packet types...")
+                packet_types_found = {}
+                scan_off = 0
+                while scan_off < min(len(resp_hex) - 20, 4000):
+                    try:
+                        payload = resp_hex[scan_off:]
+                        json_str = await DeCode_PackEt(payload)
+                        if json_str:
+                            parsed = json.loads(json_str)
+                            f2 = parsed.get('2', {})
+                            f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                            if isinstance(f2_val, int) and f2_val > 0:
+                                f1 = parsed.get('1', {})
+                                f1_val = f1.get('data') if isinstance(f1, dict) else f1
+                                f5 = parsed.get('5', {})
+                                f5_summary = ""
+                                if isinstance(f5, dict) and 'data' in f5:
+                                    f5d = f5['data']
+                                    if isinstance(f5d, dict):
+                                        f5_summary = str({k: (v.get('data') if isinstance(v, dict) else v) for k, v in list(f5d.items())[:5]})[:120]
+                                if f2_val not in packet_types_found:
+                                    packet_types_found[f2_val] = []
+                                if len(packet_types_found[f2_val]) < 3:
+                                    packet_types_found[f2_val].append({
+                                        'offset': scan_off, 'f1': f1_val, 'f5': f5_summary
+                                    })
+                                scan_off += 40
+                            else:
+                                scan_off += 2
+                        else:
+                            scan_off += 2
+                    except:
+                        scan_off += 2
+                if packet_types_found:
+                    print(f"  [G{conn.index+1}] {channel_name} PACKET TYPE SUMMARY:")
+                    for f2_val, entries in sorted(packet_types_found.items()):
+                        print(f"    f2={f2_val}: {len(entries)} packet(s)")
+                        for e in entries[:2]:
+                            print(f"      off={e['offset']}, f1={str(e['f1'])[:40]}, f5={e['f5']}")
 
                 # STRATEGY 3: If raw decode didn't find f2=18, search for '1012' pattern
                 # Protobuf: field 2 (varint) = 18 → bytes 10 12
