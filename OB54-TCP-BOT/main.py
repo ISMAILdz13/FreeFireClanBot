@@ -4440,7 +4440,9 @@ async def EncRypTMajoRLoGin(open_id, access_token):
     return  await encrypted_proto(string)
 
 async def MajorLogin(payload):
-    url = "https://loginbp.ggpolarbear.com/MajorLogin"
+    url = "https://loginbp.ggwhitehawk.com/MajorLogin",
+                "https://loginbp.ggpolarbear.com/MajorLogin",
+                "https://loginbp.ggblueshark.com/MajorLogin"
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE

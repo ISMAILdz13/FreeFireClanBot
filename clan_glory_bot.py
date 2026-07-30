@@ -152,7 +152,9 @@ async def do_major_login(session, open_id: str, access_token: str) -> Optional[d
     payload = await build_major_login(open_id, access_token)
     headers = {**HTTP_HEADERS, "Authorization": f"Bearer {access_token}"}
 
-    for url in ["https://loginbp.ggpolarbear.com/MajorLogin",
+    for url in ["https://loginbp.ggwhitehawk.com/MajorLogin",
+                "https://loginbp.ggpolarbear.com/MajorLogin",
+                "https://loginbp.ggblueshark.com/MajorLogin",
                 "https://loginbp.ggblueshark.com/MajorLogin"]:
         try:
             async with session.post(url, data=payload, headers=headers, ssl=False,
