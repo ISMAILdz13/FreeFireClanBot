@@ -192,3 +192,68 @@ class TestJoinTeamPacket(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestJoinSquadsPacketEdgeCases(unittest.IsolatedAsyncioTestCase):
+    """Edge cases for squad join packets."""
+
+    async def test_join_squads_with_long_squad_code(self):
+        """GenJoinSquadsPacket should handle long squad codes."""
+        from xC4 import CrEaTe_ProTo, DeCode_PackEt
+        
+        # Real squad code from a run: 1785451313970610651_t9kbl...
+        long_code = "1785451313970610651_t9kbl5x94abc123"
+        fields = {
+            1: 4,
+            2: {
+                1: long_code,
+            }
+        }
+        proto = await CrEaTe_ProTo(fields)
+        decoded = await DeCode_PackEt(proto.hex())
+        self.assertIsNotNone(decoded)
+        parsed = json.loads(decoded)
+        f2d = parsed.get('2', {}).get('data', {})
+        self.assertEqual(f2d.get('1', {}).get('data'), long_code)
+
+    async def test_join_squads_empty_code(self):
+        """GenJoinSquadsPacket should handle empty squad code."""
+        from xC4 import CrEaTe_ProTo
+        
+        fields = {1: 4, 2: {1: ""}}
+        proto = await CrEaTe_ProTo(fields)
+        self.assertGreater(len(proto), 0)
+
+    async def test_room_join_packet_type_0e15(self):
+        """Room join should use packet type 0e15."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        self.assertIn('"0e15"', source, "join_match should use packet type 0e15")
+        self.assertIn('"1215"', source, "join_match should also try chat channel with 1215")
+
+
+class TestStartMatchPacketEdgeCases(unittest.IsolatedAsyncioTestCase):
+    """Edge cases for start-match packets."""
+
+    async def test_start_match_field_269(self):
+        """Start match with field 269 should produce valid protobuf."""
+        from xC4 import CrEaTe_ProTo
+        
+        fields = {1: 269, 2: {1: 12480598706}}
+        proto = await CrEaTe_ProTo(fields)
+        self.assertGreater(len(proto), 4)
+        
+        from xC4 import DeCode_PackEt
+        decoded = await DeCode_PackEt(proto.hex())
+        self.assertIsNotNone(decoded)
+        parsed = json.loads(decoded)
+        self.assertEqual(parsed.get('1', {}).get('data'), 269)
+
+    async def test_start_match_field_9(self):
+        """Start match with field 9 (basic) should produce valid protobuf."""
+        from xC4 import CrEaTe_ProTo
+        
+        fields = {1: 9, 2: {1: 12480598706}}
+        proto = await CrEaTe_ProTo(fields)
+        self.assertGreater(len(proto), 4)

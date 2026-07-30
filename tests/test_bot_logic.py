@@ -379,3 +379,59 @@ class TestLeaveTeamSafety(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestBotConfigurationConstants(unittest.TestCase):
+    """Test that bot configuration constants are correct."""
+
+    def test_match_wait_is_60(self):
+        """MATCH_WAIT should be 60 seconds for longer match-finding window."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        self.assertIn("MATCH_WAIT         = 60", source)
+
+    def test_spam_duration_is_18(self):
+        """SPAM_DURATION should be 18 seconds."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        self.assertIn("SPAM_DURATION      = 18", source)
+
+    def test_join_match_method_exists(self):
+        """join_match method should exist in the source."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        self.assertIn("async def join_match", source)
+
+    def test_join_match_uses_integer_keys(self):
+        """join_match should use integer keys in nested dicts (not string keys)."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        # Should NOT have string-keyed nested dicts in join_match
+        self.assertNotIn('"1": "IDC3"', source)
+        self.assertNotIn('"1": 21}', source)
+        # Should have integer-keyed dicts
+        self.assertIn('{1: "IDC3"', source)
+        self.assertIn('{1: 21}', source)
+
+    def test_concurrent_reading_uses_gather(self):
+        """Match-waiting should use asyncio.gather for concurrent reads."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        self.assertIn("asyncio.gather", source)
+
+
+class TestConnectionMatchState(unittest.TestCase):
+    """Test Connection class match state management."""
+
+    def test_connection_has_match_found_flag(self):
+        """Connection should have match_found attribute."""
+        bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
+        with open(bot_path) as f:
+            source = f.read()
+        self.assertIn("match_found", source)
+        self.assertIn("match_data", source)
