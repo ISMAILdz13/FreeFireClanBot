@@ -106,10 +106,10 @@ async def ArohiAccepted(uid, code, K, V):
             3: int(uid),
             8: 1,
             9: {
-                2: 161,
+                2: 159,
                 4: "y[WW",
                 6: 11,
-                8: "1.114.18",
+                8: "1.120.2",
                 9: 3,
                 10: 1,
             },
@@ -1172,20 +1172,68 @@ class ClanGloryBot:
 
         print(f"  Leader: owner={owner_uid}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}, team_code={team_code}")
 
-        # Step 2: For each member — cHSq (configure) + SEnd_InV (invite)
-        # cHSq uses the LEADER's UID (configuring own squad), SEnd_InV uses TARGET's UID
+        # Step 2: For each member — cHSq (configure) + RedZed_SendInv (REAL invite)
+        # The REAL invite function (RedZed_SendInv) has 20+ fields including:
+        # - Sender's UID (2.27, 2.34) — the server needs to know WHO is inviting
+        # - Version info (2.17) — client version validation
+        # - Rank (2.7), country (2.10), name (2.6)
+        # Our old SEnd_InV only had 3 fields — that's why invites never arrived!
         for member in members:
             print(f"  [G1] Configuring squad (leader_uid={leader.account_uid}) for G{member.index+1}...")
             await leader.configure_squad(leader.account_uid, self.region.lower(), squad_size)
             await asyncio.sleep(0.3)
 
-            print(f"  [G1] Inviting G{member.index+1} (internal_uid={member.account_uid})...")
-            # Send invite on BOTH channels — some regions use chat for invites
-            await leader.send_invite(member.account_uid, self.region.lower(), squad_size)
+            print(f"  [G1] Inviting G{member.index+1} via RedZed_SendInv (internal_uid={member.account_uid})...")
+            # Build the REAL invite packet with all required fields
+            invite_fields = {
+                1: 2,
+                2: {
+                    1: int(member.account_uid),     # target UID
+                    2: self.region.upper(),          # region (ME)
+                    3: 1,
+                    4: 1,                            # mode (not squad size)
+                    6: "BOT5S8F7S",                  # leader's name
+                    7: 330,                          # rank
+                    8: 1000,
+                    9: 100,
+                    10: self.region.upper(),         # country code (ME)
+                    12: 1,
+                    13: int(member.account_uid),     # target UID repeated
+                    16: 1,
+                    17: {                            # version info
+                        2: 159,
+                        4: "y[WW",
+                        6: 11,
+                        8: "1.120.2",
+                        9: 3,
+                        10: 1
+                    },
+                    18: 306,
+                    19: 18,
+                    24: 902000306,
+                    26: {},
+                    27: {                            # SENDER's UID — critical!
+                        1: 11,
+                        2: int(leader.account_uid),
+                        3: 99999999999
+                    },
+                    28: {},
+                    31: {1: 1, 2: 32768},
+                    32: 32768,
+                    34: {                            # SENDER's UID with binary blob
+                        1: int(leader.account_uid),
+                        2: 8,
+                        3: b"\x10\x15\x08\x0A\x0B\x13\x0C\x0F\x11\x04\x07\x02\x03\x0D\x0E\x12\x01\x05\x06"
+                    }
+                }
+            }
+            invite_proto = await CrEaTe_ProTo(invite_fields)
+            invite_packet = await GeneRaTePk(invite_proto.hex(), "0515", leader.key, leader.iv)
+            # Send on online channel
+            await leader.send_packet(invite_packet, channel="online")
             await asyncio.sleep(0.5)
-            # Also try on chat channel
-            invite_pkt = await SEnd_InV(squad_size, member.account_uid, leader.key, leader.iv, self.region.upper())
-            await leader.send_packet(invite_pkt, channel="chat")
+            # Also send on chat channel for redundancy
+            await leader.send_packet(invite_packet, channel="chat")
             await asyncio.sleep(1)
 
         # Wait for invite packets to reach members
