@@ -319,6 +319,8 @@ class GuestConnection:
         self.team_code = None
         self.region = "ME"
         self.clan_compiled_data = ""
+        self.match_found = False
+        self.match_data = None
 
     def set_region(self, region: str):
         self.region = region
@@ -1324,6 +1326,8 @@ class ClanGloryBot:
                         if f2_val == 18:
                             found_match_packet = True
                             print(f"  *** MATCH PACKET FOUND (f2=18) for G{conn.index+1}! ***")
+                            conn.match_found = True
+                            conn.match_data = parsed
                         break
                     except:
                         continue
@@ -1421,6 +1425,8 @@ class ClanGloryBot:
                                                     if isinstance(v, dict) and 'data' in v:
                                                         print(f"    5.{k} = {str(v['data'])[:200]}")
                                         print(f"  *** MATCH PACKET FOUND via pattern search! ***")
+                                        conn.match_found = True
+                                        conn.match_data = parsed
                                         found_match_packet = True
                                         break
                             except:
@@ -1450,7 +1456,11 @@ class ClanGloryBot:
         # NOTE: This is an ESTIMATE only — actual glory depends on match completion
         glory_per_cycle = len(self.connections) * random.randint(5, 15)
         self.total_glory_estimated += glory_per_cycle
-        print(f"  >> Cycle #{self.cycle_count} done (est +~{glory_per_cycle} glory, running total ~{self.total_glory_estimated})")
+        match_count = sum(1 for c in self.connections if c.match_found)
+        print(f"  >> Cycle #{self.cycle_count} done (matches: {match_count}/{len(self.connections)}, est +~{glory_per_cycle} glory, running total ~{self.total_glory_estimated})")
+        for c in self.connections:
+            c.match_found = False
+            c.match_data = None
         return True
 
     async def run(self):
@@ -1475,7 +1485,7 @@ class ClanGloryBot:
             print("  Setup FAILED")
             return
 
-        start_time = time.time()
+        self.start_time = time.time()
 
         if getattr(self, 'dry_run', False):
             print("\n  === DRY RUN COMPLETE ===")
@@ -1527,7 +1537,7 @@ class ClanGloryBot:
             except:
                 pass
 
-        elapsed = int(time.time() - start_time)
+        elapsed = int(time.time() - getattr(self, 'start_time', time.time()))
         print("\n" + "=" * 60)
         print(f"  CLAN GLORY BOT - Done")
         print(f"  Cycles: {self.cycle_count}/{self.max_cycles}")
