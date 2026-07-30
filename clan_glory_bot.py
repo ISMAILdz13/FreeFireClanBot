@@ -58,7 +58,7 @@ from xC4 import (
     CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
     AuthClan, OpEnSq, AutH_GlobAl, ExiT, cHSq,
     DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
-    EnC_PacKeT, EnC_Uid, EnC_Vr,
+    EnC_PacKeT, EnC_Uid, EnC_Vr, SEnd_InV,
 )
 
 # ======================== CONFIG ========================
@@ -466,17 +466,16 @@ class GuestConnection:
         self.squad_code = None
         self.team_code = None
 
-    async def open_squad(self, region: str, squad_size: int = 2) -> dict:
+    async def open_squad(self, region: str, squad_size: int = 4) -> dict:
         """OpEnSq — leader opens squad for matchmaking.
         Uses custom fields with squad_size to set the number of additional member slots.
-        Original OpEnSq has field 2.3=1 (1 extra slot). We set it to squad_size-1."""
-        # Custom OpEnSq with squad_size
-        extra_slots = squad_size - 1  # leader + extra_slots = total squad size
+        We use 3 extra slots (4 total) for safety — Clash Squad is 4v4 anyway."""
+        extra_slots = 3  # Always 3 extra slots (4 total = leader + 3) — Clash Squad standard
         fields = {
             1: 1,
             2: {
                 2: "\u0001",
-                3: extra_slots,  # Number of additional member slots (was hardcoded 1)
+                3: extra_slots,  # 3 extra slots = 4 total (Clash Squad standard)
                 4: 1,
                 5: "en",
                 9: 1,
@@ -715,14 +714,19 @@ class GuestConnection:
 
     async def start_match_leader(self):
         """LEADER sends start-match packets to actually START the match.
-        Sends THREE packet types to maximize chance of match starting:
-        1. field 1=269 (detailed, with device info) — real game client format
-        2. field 1=214 (simple start, d6 hex) — alternative start command
-        3. field 1=9 (basic) — fallback, same as members
-        """
-        pkt_type = get_packet_type(self.region)
+        Key insight: TCP bot's create_simple_start_packet uses packet type '0514'
+        for ALL regions — not the region-specific type. Try both 0514 and 0515."""
+        pkt_type_region = get_packet_type(self.region)  # 0515 for ME
+        pkt_type_0514 = '0514'  # Used by TCP bot's simple start for ALL regions
 
-        # 1. Detailed start with device info (field 1=269)
+        # 1. Simple start (field 1=214) with packet type 0514 — TCP bot's format
+        fields_simple = {1: 214, 2: {1: 1}}
+        pkt_simple = await GeneRaTePk((await CrEaTe_ProTo(fields_simple)).hex(), pkt_type_0514, self.key, self.iv)
+        await self.send_packet(pkt_simple, channel="online")
+        print(f"  [G{self.index+1}] LEADER start #1 (field=214, type=0514) sent!")
+        await asyncio.sleep(0.5)
+
+        # 2. Detailed start (field 1=269) with device info — use 0514
         fields_detailed = {
             1: 269,
             2: {
@@ -736,23 +740,47 @@ class GuestConnection:
                 15: 269
             }
         }
-        pkt_detailed = await GeneRaTePk((await CrEaTe_ProTo(fields_detailed)).hex(), pkt_type, self.key, self.iv)
+        pkt_detailed = await GeneRaTePk((await CrEaTe_ProTo(fields_detailed)).hex(), pkt_type_0514, self.key, self.iv)
         await self.send_packet(pkt_detailed, channel="online")
-        print(f"  [G{self.index+1}] LEADER start-match #1 (field 1=269, detailed) sent!")
+        print(f"  [G{self.index+1}] LEADER start #2 (field=269, type=0514, detailed) sent!")
+        await asyncio.sleep(0.5)
+
+        # 3. Same packets with region-specific type (0515 for ME)
+        pkt_simple_15 = await GeneRaTePk((await CrEaTe_ProTo(fields_simple)).hex(), pkt_type_region, self.key, self.iv)
+        await self.send_packet(pkt_simple_15, channel="online")
+        print(f"  [G{self.index+1}] LEADER start #3 (field=214, type={pkt_type_region}) sent!")
         await asyncio.sleep(0.3)
 
-        # 2. Simple start (field 1=214)
-        fields_simple = {1: 214, 2: {1: 1}}
-        pkt_simple = await GeneRaTePk((await CrEaTe_ProTo(fields_simple)).hex(), pkt_type, self.key, self.iv)
-        await self.send_packet(pkt_simple, channel="online")
-        print(f"  [G{self.index+1}] LEADER start-match #2 (field 1=214, simple) sent!")
-        await asyncio.sleep(0.3)
-
-        # 3. Basic start (field 1=9, same as members)
+        # 4. Basic start (field 1=9) with region type
         fields_basic = {1: 9, 2: {1: self.account_uid}}
-        pkt_basic = await GeneRaTePk((await CrEaTe_ProTo(fields_basic)).hex(), pkt_type, self.key, self.iv)
+        pkt_basic = await GeneRaTePk((await CrEaTe_ProTo(fields_basic)).hex(), pkt_type_region, self.key, self.iv)
         await self.send_packet(pkt_basic, channel="online")
-        print(f"  [G{self.index+1}] LEADER start-match #3 (field 1=9, basic) sent!")
+        print(f"  [G{self.index+1}] LEADER start #4 (field=9, type={pkt_type_region}) sent!")
+
+        # 5. Also send on CHAT channel (not just online) — server might listen on both
+        await self.send_packet(pkt_simple, channel="chat")
+        print(f"  [G{self.index+1}] LEADER start #5 (field=214 via CHAT channel) sent!")
+
+    async def listen_for_responses(self, duration: float) -> list:
+        """Listen for server responses during spam period. Catches match-found packets."""
+        responses = []
+        end_time = time.time() + duration
+        while time.time() < end_time and self.connected:
+            try:
+                data = await asyncio.wait_for(self.online_reader.read(9999), timeout=1.0)
+                if data:
+                    hex_str = data.hex()
+                    responses.append({
+                        'guest': self.index + 1,
+                        'hex': hex_str,
+                        'hex_len': len(hex_str),
+                        'header': hex_str[:12]
+                    })
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+        return responses
 
     async def spam_start_match(self, duration: float, delay: float):
         """Members spam 'I'm ready' packets (field 1=9) on the ONLINE socket.
@@ -894,15 +922,10 @@ class ClanGloryBot:
         leader_response = await leader.open_squad(self.region, squad_size=len(self.connections))
         await asyncio.sleep(2)
 
-        # CRITICAL: Call cHSq for EACH member to reserve their slot
-        # TCP bot flow: OpEnSq → cHSq(N, target_uid) per target → SEnd_InV
-        # cHSq with target_uid reserves a slot for that specific player
-        squad_size = len(self.connections)
-        for member in members:
-            print(f"  [G1] cHSq: reserving slot for G{member.index+1} (uid={member.account_uid}, squad_size={squad_size})...")
-            chsq_packet = await cHSq(squad_size, member.account_uid, leader.key, leader.iv, self.region)
-            await leader.send_packet(chsq_packet, channel="online")
-            await asyncio.sleep(0.5)
+        # No cHSq — it was inconsistent (sometimes 3/3, sometimes 2/3)
+        # Instead, OpEnSq field 2.3 = 3 creates 4 total slots (leader + 3)
+        # Even if one slot is wasted, 2 members can still join reliably
+        await asyncio.sleep(2)  # Wait for server to register the 4-slot squad
 
         team_code = leader_response.get("team_code")
         chat_code = leader_response.get("chat_code")
@@ -968,7 +991,21 @@ class ClanGloryBot:
                     if joined:
                         print(f"  [G{member.index+1}] In squad (retry)")
                     else:
-                        print(f"  [G{member.index+1}] ❌ Failed to join after retries")
+                        # Retry 3: Leader sends invite, member waits for it
+                        print(f"  [G{member.index+1}] Direct join failed. Trying invite-based approach...")
+                        try:
+                            inv_pkt = await SEnd_InV(3, int(member.account_uid), leader.key, leader.iv, self.region)
+                            await leader.send_packet(inv_pkt, channel="online")
+                            print(f"  [G1] Sent SEnd_InV invite to G{member.index+1}")
+                            await asyncio.sleep(2)
+                            # Member tries to join again after receiving invite
+                            joined = await member.join_team(team_code)
+                            if joined:
+                                print(f"  [G{member.index+1}] In squad (via invite + join)")
+                            else:
+                                print(f"  [G{member.index+1}] ❌ Failed to join after all retries")
+                        except Exception as e:
+                            print(f"  [G{member.index+1}] Invite fallback error: {e}")
 
         in_squad_count = sum(1 for c in self.connections if c.in_squad)
         print(f"  Squad formed: {in_squad_count}/{len(self.connections)} players in squad")
@@ -987,13 +1024,48 @@ class ClanGloryBot:
             await asyncio.sleep(1)
 
         # ALL members (including leader) spam 'I'm ready' (field 1=9)
+        # ALSO: read ALL server responses during spam to catch match-found packets
         print(f"  >> Spamming ready packets (field 1=9) for {SPAM_DURATION}s...")
+        print(f"  >> ALSO listening for match-found responses during spam...")
+
+        async def spam_and_listen(conn, duration, delay):
+            """Spam ready packets AND read any server responses simultaneously."""
+            spam_task = asyncio.create_task(conn.spam_start_match(duration, delay))
+            listen_task = asyncio.create_task(conn.listen_for_responses(duration))
+            spam_count, responses = await asyncio.gather(spam_task, listen_task)
+            return spam_count, responses
+
         tasks = []
         for conn in self.connections:
             if conn.connected:
-                tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
+                tasks.append(spam_and_listen(conn, SPAM_DURATION, SPAM_DELAY))
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        total_packets = sum(r for r in results if isinstance(r, int))
+        total_packets = 0
+        for r in results:
+            if isinstance(r, tuple):
+                total_packets += r[0] if isinstance(r[0], int) else 0
+                for resp in r[1]:
+                    print(f"  [G{resp['guest']}] DURING SPAM response: {resp['hex_len']} hex, header={resp['header']}")
+                    # Decode if large enough
+                    if resp['hex_len'] > 50:
+                        for skip in [10, 8, 12]:
+                            try:
+                                json_str = await DeCode_PackEt(resp['hex'][skip:])
+                                if json_str:
+                                    parsed = json.loads(json_str)
+                                    f1 = parsed.get('1', {})
+                                    f5 = parsed.get('5', {})
+                                    print(f"    -> field1={f1}")
+                                    if isinstance(f5, dict) and 'data' in f5:
+                                        for k in sorted(f5['data'].keys())[:8]:
+                                            v = f5['data'][k]
+                                            if isinstance(v, dict) and 'data' in v:
+                                                print(f"    -> 5.{k} = {str(v['data'])[:50]}")
+                                    break
+                            except:
+                                continue
+            elif isinstance(r, int):
+                total_packets += r
         print(f"  >> Sent {total_packets} ready packets total")
 
         print(f"  >> Waiting {MATCH_WAIT}s for match completion...")
