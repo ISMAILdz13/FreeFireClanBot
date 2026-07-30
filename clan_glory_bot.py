@@ -362,117 +362,108 @@ class GuestConnection:
         """Set the region for packet type mapping."""
         self.region = region
 
-    async def read_invite_code(self, timeout: float = 8.0) -> dict:
+    async def read_invite_code(self, timeout: float = 12.0) -> dict:
         """
-        Read invite packet(s) from Online socket.
-        Reads up to 3 times, searches for '0500' packet type.
-        Extracts: owner_uid (5.1) and invite_code (5.8).
+        Read packets from BOTH online and chat channels.
+        For each chunk, check if it starts with '0500' (like TCP bot).
+        If yes, decode from offset 10 and extract field 5.1 (owner) and 5.8 (invite code).
         """
         result = {"owner_uid": None, "invite_code": None}
-        all_data_hex = ""
-        # Read from BOTH online and chat channels — invite might arrive on either
-        for _ in range(3):
+        deadline = asyncio.get_event_loop().time() + timeout
+        packets_checked = 0
+        chat_chunks = 0
+        online_chunks = 0
+
+        while asyncio.get_event_loop().time() < deadline:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+
+            # Read from ONLINE channel (small timeout)
             try:
-                data = await asyncio.wait_for(self.online_reader.read(9999), timeout=timeout / 3)
+                data = await asyncio.wait_for(self.online_reader.read(9999), timeout=min(remaining, 2.0))
                 if data:
-                    all_data_hex += data.hex()
+                    online_chunks += 1
+                    data_hex = data.hex()
+                    # Check if THIS chunk starts with 0500 (like TCP bot)
+                    if data_hex.startswith("0500"):
+                        packets_checked += 1
+                        decoded = await self._try_decode_invite(data_hex)
+                        if decoded.get("invite_code"):
+                            print(f"  [G{self.index+1}] ✅ Found invite on ONLINE channel: owner={decoded['owner_uid']}, code={decoded['invite_code'][:25]}...")
+                            return decoded
             except asyncio.TimeoutError:
                 pass
             except:
                 pass
-            # Also try chat channel
+
+            # Read from CHAT channel (small timeout)
             if self.chat_reader:
                 try:
-                    chat_data = await asyncio.wait_for(self.chat_reader.read(9999), timeout=1.0)
+                    chat_data = await asyncio.wait_for(self.chat_reader.read(9999), timeout=min(remaining, 2.0))
                     if chat_data:
-                        all_data_hex += chat_data.hex()
-                        print(f"  [G{self.index+1}] Got {len(chat_data.hex())} hex from CHAT channel")
+                        chat_chunks += 1
+                        data_hex = chat_data.hex()
+                        # Check if THIS chunk starts with 0500
+                        if data_hex.startswith("0500"):
+                            packets_checked += 1
+                            decoded = await self._try_decode_invite(data_hex)
+                            if decoded.get("invite_code"):
+                                print(f"  [G{self.index+1}] ✅ Found invite on CHAT channel: owner={decoded['owner_uid']}, code={decoded['invite_code'][:25]}...")
+                                return decoded
+                        # Also search for 0500 within the chunk (might be concatenated)
+                        idx = data_hex.find("0500", 4)  # skip start
+                        while idx >= 0 and idx < len(data_hex) - 20:
+                            sub = data_hex[idx:]
+                            decoded = await self._try_decode_invite(sub)
+                            if decoded.get("invite_code"):
+                                print(f"  [G{self.index+1}] ✅ Found invite at offset {idx} in CHAT data: owner={decoded['owner_uid']}, code={decoded['invite_code'][:25]}...")
+                                return decoded
+                            idx = data_hex.find("0500", idx + 4)
                 except asyncio.TimeoutError:
                     pass
                 except:
                     pass
-        if not all_data_hex:
-            print(f"  [G{self.index+1}] No invite data")
-            return result
-        print(f"  [G{self.index+1}] Invite data: {len(all_data_hex)} hex chars")
-        if len(all_data_hex) <= 200:
-            print(f"  [G{self.index+1}] Raw hex: {all_data_hex}")
-        # Strategy 1: search for 0500 and parse from there
-        idx = all_data_hex.find("0500")
-        while idx >= 0:
-            for skip in [10, 8, 12, 6, 14, 16, 4, 18, 20]:
-                payload = all_data_hex[idx + skip:]
+
+        print(f"  [G{self.index+1}] No invite found (online={online_chunks} chunks, chat={chat_chunks} chunks, 0500 packets={packets_checked})")
+        return result
+
+    async def _try_decode_invite(self, data_hex: str) -> dict:
+        """Try to decode a 0500 packet and extract owner_uid (5.1) + invite_code (5.8)."""
+        result = {"owner_uid": None, "invite_code": None}
+        # TCP bot decodes from data_hex[10:] — skip first 5 bytes (type + header)
+        for skip in [10, 8, 12, 6, 14]:
+            try:
+                payload = data_hex[skip:]
                 if len(payload) < 20:
                     continue
-                for attempt_name, payload_data in [("raw", payload), ("dec", None)]:
-                    try:
-                        if attempt_name == "dec":
-                            payload_data = await DEc_PacKeT(payload, self.key, self.iv)
-                            if not payload_data:
-                                continue
-                        json_str = await DeCode_PackEt(payload_data)
-                        if not json_str:
-                            continue
-                        packet_json = json.loads(json_str)
-                        if '5' not in packet_json:
-                            continue
-                        field5 = packet_json['5']
-                        if not isinstance(field5, dict) or 'data' not in field5:
-                            continue
-                        field5_data = field5['data']
-                        if not isinstance(field5_data, dict):
-                            continue
-                        f1 = field5_data.get('1', {})
-                        if isinstance(f1, dict) and 'data' in f1:
-                            result["owner_uid"] = str(f1['data'])
-                        f8 = field5_data.get('8', {})
-                        if isinstance(f8, dict) and 'data' in f8:
-                            val = str(f8['data'])
-                            if len(val) > 10:
-                                result["invite_code"] = val
-                        if result["invite_code"]:
-                            print(f"  [G{self.index+1}] Found at 0500@{idx}+{skip} ({attempt_name}): owner={result['owner_uid']}, invite={result['invite_code'][:25]}...")
-                            return result
-                    except:
-                        pass
-            idx = all_data_hex.find("0500", idx + 4)
-        # Strategy 2: try all offsets 0-60
-        for offset in range(0, min(60, len(all_data_hex)), 2):
-            payload = all_data_hex[offset:]
-            if len(payload) < 20:
-                break
-            for attempt_name, payload_data in [("raw", payload), ("dec", None)]:
-                try:
-                    if attempt_name == "dec":
-                        payload_data = await DEc_PacKeT(payload, self.key, self.iv)
-                        if not payload_data:
-                            continue
-                    json_str = await DeCode_PackEt(payload_data)
-                    if not json_str:
-                        continue
-                    packet_json = json.loads(json_str)
-                    if '5' not in packet_json:
-                        continue
-                    field5 = packet_json['5']
-                    if not isinstance(field5, dict) or 'data' not in field5:
-                        continue
-                    field5_data = field5['data']
-                    if not isinstance(field5_data, dict):
-                        continue
-                    f1 = field5_data.get('1', {})
-                    if isinstance(f1, dict) and 'data' in f1:
-                        result["owner_uid"] = str(f1['data'])
-                    f8 = field5_data.get('8', {})
-                    if isinstance(f8, dict) and 'data' in f8:
-                        val = str(f8['data'])
-                        if len(val) > 10:
-                            result["invite_code"] = val
-                    if result["invite_code"]:
-                        print(f"  [G{self.index+1}] Found at offset {offset} ({attempt_name}): owner={result['owner_uid']}, invite={result['invite_code'][:25]}...")
-                        return result
-                except:
-                    pass
-        print(f"  [G{self.index+1}] Could not extract invite code (tried 0500 search + all offsets)")
+                # Try raw decode first
+                json_str = await DeCode_PackEt(payload)
+                if not json_str:
+                    continue
+                packet_json = json.loads(json_str)
+                if '5' not in packet_json:
+                    continue
+                field5 = packet_json['5']
+                if not isinstance(field5, dict) or 'data' not in field5:
+                    continue
+                field5_data = field5['data']
+                if not isinstance(field5_data, dict):
+                    continue
+                # Extract owner_uid (5.1)
+                f1 = field5_data.get('1', {})
+                if isinstance(f1, dict) and 'data' in f1:
+                    result["owner_uid"] = str(f1['data'])
+                # Extract invite_code (5.8)
+                f8 = field5_data.get('8', {})
+                if isinstance(f8, dict) and 'data' in f8:
+                    val = str(f8['data'])
+                    if len(val) > 10:  # Real invite codes are long strings
+                        result["invite_code"] = val
+                if result["invite_code"]:
+                    return result
+            except:
+                pass
         return result
 
     async def authenticate(self, session: aiohttp.ClientSession) -> bool:
