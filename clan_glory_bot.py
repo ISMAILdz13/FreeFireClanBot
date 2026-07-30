@@ -45,7 +45,7 @@ from Crypto.Util.Padding import pad, unpad
 
 from Pb2 import MajoRLoGinrEq_pb2, MajoRLoGinrEs_pb2, PorTs_pb2
 from xC4 import (
-    CrEaTe_ProTo, EnC_PacKeT, GeneRaTePk, DecodE_HeX,
+    CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
     AuthClan, OpEnSq, SEnd_InV, GenJoinSquadsPacket, ExiT,
     AutH_GlobAl, EnC_Uid, EnC_Vr,
 )
@@ -80,6 +80,57 @@ HTTP_HEADERS = {
 }
 
 GUESTS_FILE = os.path.join(BASE_DIR, "data", "guests.json")
+GARENA_CLIENT_ID = "100067"
+GARENA_CLIENT_SECRET = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
+OAUTH_V2_URL = "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant"
+OAUTH_V1_URL = "https://100067.connect.garena.com/oauth/guest/token/grant"
+UA_OAUTH = "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)"
+
+
+async def refresh_guest_token(session, uid: str, password: str) -> tuple:
+    """Refresh OAuth access_token + open_id (tries v2 then v1)."""
+    # v2 JSON
+    try:
+        resp = await session.post(OAUTH_V2_URL, json={
+            "client_id": int(GARENA_CLIENT_ID),
+            "client_secret": GARENA_CLIENT_SECRET,
+            "client_type": 2,
+            "password": password,
+            "response_type": "token",
+            "uid": int(uid),
+        }, headers={
+            "User-Agent": UA_OAUTH,
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "gzip",
+        }, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json().get("data", resp.json())
+            at = data.get("access_token")
+            oid = data.get("open_id")
+            if at and oid:
+                return at, oid
+    except Exception:
+        pass
+    # v1 form-urlencoded
+    try:
+        resp = await session.post(OAUTH_V1_URL, data={
+            "uid": uid, "password": password,
+            "response_type": "token", "client_type": "2",
+            "client_secret": GARENA_CLIENT_SECRET,
+            "client_id": GARENA_CLIENT_ID,
+        }, headers={
+            "User-Agent": UA_OAUTH,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }, timeout=15)
+        if resp.status_code == 200:
+            d = resp.json()
+            if d.get("access_token") and d.get("open_id"):
+                return d["access_token"], d["open_id"]
+    except Exception:
+        pass
+    return None, None
 
 # ======================== AUTH ========================
 
@@ -221,7 +272,7 @@ def build_tcp_auth_token(account_uid: int, jwt: str, timestamp: int, key: bytes,
     encrypted_timestamp = bytes(ts_bytes).hex()
 
     token_hex = jwt.encode().hex()
-    encrypted_packet = EnC_PacKeT(token_hex, key, iv)
+    encrypted_packet = EnC_PacKeT_sync(token_hex, key, iv)
     encrypted_packet_length = hex(len(encrypted_packet) // 2)[2:]
 
     if uid_length == 9:    headers = '0000000'
