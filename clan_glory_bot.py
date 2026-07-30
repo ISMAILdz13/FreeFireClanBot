@@ -362,72 +362,64 @@ class GuestConnection:
         """Set the region for packet type mapping."""
         self.region = region
 
-    async def read_invite_code(self, timeout: float = 5.0) -> Optional[str]:
+    async def read_invite_code(self, timeout: float = 5.0) -> dict:
         """
-        Read invite packet from Online socket — extract squad join code.
-        TCP bot uses: field5_data.get('8', {}).get('data') as the invite code.
+        Read invite packet from Online socket.
+        Extracts: owner_uid (5.1) and invite_code (5.8).
+        TCP bot flow: field5_data.get('1') = squad_owner, field5_data.get('8') = code.
         """
+        result = {"owner_uid": None, "invite_code": None}
         try:
             data = await asyncio.wait_for(self.online_reader.read(9999), timeout=timeout)
             if not data:
-                return None
+                return result
             data_hex = data.hex()
-            print(f"  [G{self.index+1}] Invite response: {data_hex[:80]}...")
+            print(f"  [G{self.index+1}] Invite packet: {data_hex[:80]}...")
 
             for header_skip in [10, 8, 12, 6, 14]:
                 payload_hex = data_hex[header_skip:]
                 if not payload_hex:
                     continue
 
-                # Try raw parse
-                try:
-                    json_str = await DeCode_PackEt(payload_hex)
-                    if json_str:
+                for attempt_name, payload in [("raw", payload_hex), ("decrypted", None)]:
+                    try:
+                        if attempt_name == "decrypted":
+                            payload = await DEc_PacKeT(payload_hex, self.key, self.iv)
+                        json_str = await DeCode_PackEt(payload)
+                        if not json_str:
+                            continue
                         packet_json = json.loads(json_str)
                         field5 = packet_json.get('5', {})
-                        if isinstance(field5, dict) and 'data' in field5:
-                            field5_data = field5['data']
-                            if isinstance(field5_data, dict):
-                                # Field 8 = invite code (TCP bot's approach)
-                                code = field5_data.get('8', {})
-                                if isinstance(code, dict) and 'data' in code:
-                                    print(f"  [G{self.index+1}] Invite code from field 5.8: {code['data']}")
-                                    return str(code['data'])
-                                # Also try field 31 (GeTSQDaTa's squad code)
-                                code31 = field5_data.get('31', {})
-                                if isinstance(code31, dict) and 'data' in code31:
-                                    print(f"  [G{self.index+1}] Squad code from field 5.31: {code31['data']}")
-                                    return str(code31['data'])
-                except:
-                    pass
+                        if not isinstance(field5, dict) or 'data' not in field5:
+                            continue
+                        field5_data = field5['data']
+                        if not isinstance(field5_data, dict):
+                            continue
 
-                # Try decrypted parse
-                try:
-                    decrypted_hex = await DEc_PacKeT(payload_hex, self.key, self.iv)
-                    json_str = await DeCode_PackEt(decrypted_hex)
-                    if json_str:
-                        packet_json = json.loads(json_str)
-                        field5 = packet_json.get('5', {})
-                        if isinstance(field5, dict) and 'data' in field5:
-                            field5_data = field5['data']
-                            if isinstance(field5_data, dict):
-                                code = field5_data.get('8', {})
-                                if isinstance(code, dict) and 'data' in code:
-                                    print(f"  [G{self.index+1}] Invite code (decrypted) from field 5.8: {code['data']}")
-                                    return str(code['data'])
-                                code31 = field5_data.get('31', {})
-                                if isinstance(code31, dict) and 'data' in code31:
-                                    print(f"  [G{self.index+1}] Squad code (decrypted) from field 5.31: {code31['data']}")
-                                    return str(code31['data'])
-                except:
-                    pass
+                        # Field 5.1 = squad owner UID
+                        f1 = field5_data.get('1', {})
+                        if isinstance(f1, dict) and 'data' in f1:
+                            result["owner_uid"] = str(f1['data'])
 
-            return None
+                        # Field 5.8 = invite code (what ArohiAccepted needs!)
+                        f8 = field5_data.get('8', {})
+                        if isinstance(f8, dict) and 'data' in f8:
+                            result["invite_code"] = str(f8['data'])
+
+                        if result["invite_code"]:
+                            print(f"  [G{self.index+1}] Owner={result['owner_uid']}, Invite={result['invite_code'][:30]}")
+                            return result
+                    except:
+                        pass
+
+            print(f"  [G{self.index+1}] Could not extract invite code from packet")
+            return result
         except asyncio.TimeoutError:
-            return None
+            print(f"  [G{self.index+1}] No invite packet within {timeout}s")
+            return result
         except Exception as e:
             print(f"  [G{self.index+1}] Read invite error: {e}")
-            return None
+            return result
 
     async def authenticate(self, session: aiohttp.ClientSession) -> bool:
         """Full OAuth -> MajorLogin -> GetLoginData chain.
@@ -579,101 +571,100 @@ class GuestConnection:
         self.in_match = False
         self.squad_code = None
 
-    async def open_squad(self, region: str) -> str:
+    async def open_squad(self, region: str) -> dict:
         """
         OpEnSq — leader opens squad for matchmaking.
-        READS the server response to extract the squad_code.
-        Returns the squad_code or None on failure.
+        READS the server response to extract owner_uid, invite_code, chat_code, squad_code.
+        Returns a dict with all extracted fields.
         """
         packet = await OpEnSq(self.key, self.iv, region)
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
         self.in_squad = True
 
-        # Read the server response to get the squad_code
-        squad_code = await self.read_squad_code()
-        if squad_code:
-            self.squad_code = squad_code
-            print(f"  [G{self.index+1}] Squad opened, code: {squad_code[:20]}...")
+        # Read the server response
+        response = await self.read_squad_response()
+        if response.get("squad_code"):
+            self.squad_code = response["squad_code"]
+            print(f"  [G{self.index+1}] Squad opened: owner={response.get('owner_uid')}, code={response['squad_code'][:30]}...")
         else:
-            print(f"  [G{self.index+1}] Squad opened but no code in response — using UID fallback")
-            self.squad_code = str(self.account_uid)
-        return self.squad_code
+            print(f"  [G{self.index+1}] Squad opened but limited info in response")
+        return response
 
-    async def read_squad_code(self, timeout: float = 5.0) -> Optional[str]:
+    async def read_squad_response(self, timeout: float = 5.0) -> dict:
         """
-        Read TCP response from Online channel, extract squad_code.
-        Based on TCP bot approach: check 0500 prefix, parse data_hex[10:].
-        Tries multiple header offsets and both raw/decrypted parsing.
+        Read TCP response from Online channel after OpEnSq.
+        Extract ALL fields: owner_uid (5.1), invite_code (5.8),
+        chat_code (5.17), squad_code (5.31).
+        Returns dict with keys: owner_uid, invite_code, chat_code, squad_code.
         """
+        result = {"owner_uid": None, "invite_code": None, "chat_code": None, "squad_code": None}
         try:
             data = await asyncio.wait_for(self.online_reader.read(9999), timeout=timeout)
             if not data:
-                return None
+                return result
             data_hex = data.hex()
             print(f"  [G{self.index+1}] Raw response: {data_hex[:80]}... ({len(data_hex)} hex chars)")
 
-            # The TCP bot checks for "0500" prefix — but responses may have
-            # different prefixes. Try multiple header offsets.
             for header_skip in [10, 8, 12, 6, 14]:
                 payload_hex = data_hex[header_skip:]
                 if not payload_hex:
                     continue
 
-                # Try 1: parse without decryption (server responses may be unencrypted)
-                try:
-                    json_str = await DeCode_PackEt(payload_hex)
-                    if json_str:
-                        packet_json = json.loads(json_str)
-                        # Check if this has squad data (field 5 with nested data)
-                        # GeTSQDaTa expects: D['5']['data']['31']['data']
-                        field5 = packet_json.get('5', {})
-                        if isinstance(field5, dict) and 'data' in field5:
-                            try:
-                                uid, chat_code, squad_code = await GeTSQDaTa(packet_json)
-                                print(f"  [G{self.index+1}] Squad code from field 5.31: {squad_code}")
-                                return str(squad_code)
-                            except Exception as ex:
-                                # Try extracting field 8 (invite code) as fallback
-                                field5_data = field5.get('data', {})
-                                if isinstance(field5_data, dict):
-                                    code = field5_data.get('8', {})
-                                    if isinstance(code, dict) and 'data' in code:
-                                        print(f"  [G{self.index+1}] Squad code from field 5.8: {code['data']}")
-                                        return str(code['data'])
-                except:
-                    pass
-
-                # Try 2: decrypt first, then parse
-                try:
-                    decrypted_hex = await DEc_PacKeT(payload_hex, self.key, self.iv)
-                    json_str = await DeCode_PackEt(decrypted_hex)
-                    if json_str:
+                for attempt_name, payload in [("raw", payload_hex), ("decrypted", None)]:
+                    try:
+                        if attempt_name == "decrypted":
+                            payload = await DEc_PacKeT(payload_hex, self.key, self.iv)
+                        json_str = await DeCode_PackEt(payload)
+                        if not json_str:
+                            continue
                         packet_json = json.loads(json_str)
                         field5 = packet_json.get('5', {})
-                        if isinstance(field5, dict) and 'data' in field5:
-                            try:
-                                uid, chat_code, squad_code = await GeTSQDaTa(packet_json)
-                                print(f"  [G{self.index+1}] Squad code (decrypted) from field 5.31: {squad_code}")
-                                return str(squad_code)
-                            except:
-                                field5_data = field5.get('data', {})
-                                if isinstance(field5_data, dict):
-                                    code = field5_data.get('8', {})
-                                    if isinstance(code, dict) and 'data' in code:
-                                        print(f"  [G{self.index+1}] Squad code (decrypted) from field 5.8: {code['data']}")
-                                        return str(code['data'])
-                except:
-                    pass
+                        if not isinstance(field5, dict) or 'data' not in field5:
+                            continue
+                        field5_data = field5['data']
+                        if not isinstance(field5_data, dict):
+                            continue
 
-            print(f"  [G{self.index+1}] Could not parse squad code from response")
-            return None
+                        # Extract all fields
+                        # Field 5.1 = owner UID
+                        f1 = field5_data.get('1', {})
+                        if isinstance(f1, dict) and 'data' in f1:
+                            result["owner_uid"] = str(f1['data'])
+                            print(f"  [G{self.index+1}] Owner UID (5.1): {result['owner_uid']}")
+
+                        # Field 5.8 = invite code (what ArohiAccepted needs!)
+                        f8 = field5_data.get('8', {})
+                        if isinstance(f8, dict) and 'data' in f8:
+                            result["invite_code"] = str(f8['data'])
+                            print(f"  [G{self.index+1}] Invite code (5.8): {result['invite_code']}")
+
+                        # Field 5.17 = chat code (what AutH_Chat needs!)
+                        f17 = field5_data.get('17', {})
+                        if isinstance(f17, dict) and 'data' in f17:
+                            result["chat_code"] = str(f17['data'])
+                            print(f"  [G{self.index+1}] Chat code (5.17): {result['chat_code']}")
+
+                        # Field 5.31 = squad code
+                        f31 = field5_data.get('31', {})
+                        if isinstance(f31, dict) and 'data' in f31:
+                            result["squad_code"] = str(f31['data'])
+                            print(f"  [G{self.index+1}] Squad code (5.31): {result['squad_code']}")
+
+                        if result["squad_code"] or result["invite_code"]:
+                            return result
+
+                    except:
+                        pass
+
+            print(f"  [G{self.index+1}] Could not parse squad response fully")
+            return result
         except asyncio.TimeoutError:
             print(f"  [G{self.index+1}] No response within {timeout}s")
-            return None
+            return result
         except Exception as e:
-            print(f"  [G{self.index+1}] Read squad code error: {e}")
-            return None
+            print(f"  [G{self.index+1}] Read response error: {e}")
+            return result
 
     async def send_invite(self, target_uid: int, region: str):
         """SEnd_InV — invite a player to squad."""
@@ -840,9 +831,13 @@ class ClanGloryBot:
 
     async def form_squad(self) -> bool:
         """
-        Leader opens squad -> gets squad_code from server response.
-        Leader invites members.
-        Members join using the REAL squad_code (not leader UID!).
+        Full squad formation (matches TCP bot flow):
+        1. ALL members reset/leave existing squad
+        2. Leader opens squad (OpEnSq) -> extracts owner_uid, chat_code, squad_code
+        3. Leader invites each member (SEnd_InV)
+        4. Each member READS their own invite packet -> extracts invite_code (5.8)
+        5. Member accepts with ArohiAccepted(owner_uid, invite_code)
+        6. Member authenticates squad chat with AutH_Chat(3, owner_uid, chat_code)
         """
         if not self.connections:
             return False
@@ -858,47 +853,67 @@ class ClanGloryBot:
             await conn.reset_squad()
         await asyncio.sleep(1)
 
-        # Step 1: Leader opens squad and READS the response to get squad_code
-        squad_code = await leader.open_squad(self.region)
+        # Step 1: Leader opens squad and reads response
+        leader_response = await leader.open_squad(self.region)
         await asyncio.sleep(2)
 
-        if not squad_code:
-            print(f"  ⚠ Leader got no squad_code — trying invite-based approach")
-            squad_code = None
+        owner_uid = leader_response.get("owner_uid") or str(leader.account_uid)
+        chat_code = leader_response.get("chat_code")
+        invite_code_from_leader = leader_response.get("invite_code")
+        squad_code = leader_response.get("squad_code")
 
-        # Leader invites each member
+        print(f"  Leader: owner={owner_uid}, invite={'Y' if invite_code_from_leader else 'N'}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}")
+
+        # Step 2: Leader invites each member
         for member in members:
             await leader.send_invite(member.account_uid, self.region)
             await asyncio.sleep(1)
-
-        # Wait for invites to process
         await asyncio.sleep(2)
 
-        # Members join using the squad_code
+        # Step 3: Each member reads invite packet and accepts
         for member in members:
             try:
-                code = squad_code
-                if not code:
-                    # Fallback: read the invite packet from the member's socket
+                invite_code = invite_code_from_leader
+                member_owner_uid = owner_uid
+
+                if not invite_code:
+                    # Member reads their own invite packet to get invite code (field 5.8)
                     print(f"  [G{member.index+1}] Reading invite packet...")
-                    code = await member.read_invite_code(timeout=5.0)
-                if code:
-                    # Use ArohiAccepted (TCP bot's invite accept) — includes leader UID
-                    accept_packet = await ArohiAccepted(leader.account_uid, code, member.key, member.iv)
+                    invite_data = await member.read_invite_code(timeout=5.0)
+                    if invite_data.get("invite_code"):
+                        invite_code = invite_data["invite_code"]
+                    if invite_data.get("owner_uid"):
+                        member_owner_uid = invite_data["owner_uid"]
+
+                if invite_code:
+                    # Accept invite with correct owner UID and invite code
+                    accept_packet = await ArohiAccepted(member_owner_uid, invite_code, member.key, member.iv)
+                    await member.send_packet(accept_packet)
                     await asyncio.sleep(1)
-                    # Authenticate squad chat (TCP bot does this after joining)
-                    chat_auth_packet = await AutH_Chat(3, leader.account_uid, code, member.key, member.iv)
-                    await member.send_packet(chat_auth_packet, channel="chat")
+
+                    # Authenticate squad chat with chat_code (from leader's response)
+                    if chat_code:
+                        chat_auth_packet = await AutH_Chat(3, member_owner_uid, chat_code, member.key, member.iv)
+                        await member.send_packet(chat_auth_packet, channel="chat")
+                        print(f"  [G{member.index+1}] ✅ Accepted + chat auth (invite: {str(invite_code)[:25]}...)")
+                    else:
+                        print(f"  [G{member.index+1}] ✅ Accepted invite (no chat code)")
+
+                    member.in_squad = True
+                elif squad_code:
+                    # Fallback: try squad code from field 5.31
+                    accept_packet = await ArohiAccepted(member_owner_uid, squad_code, member.key, member.iv)
                     await member.send_packet(accept_packet)
                     member.in_squad = True
-                    print(f"  [G{member.index+1}] Accepted invite + chat auth (code: {str(code)[:20]}...)")
+                    print(f"  [G{member.index+1}] ⚠ Accepted with squad_code fallback: {str(squad_code)[:25]}...")
                 else:
-                    print(f"  [G{member.index+1}] No invite code — squad join may fail")
+                    print(f"  [G{member.index+1}] ❌ No invite code — cannot join squad")
             except Exception as e:
                 print(f"  [G{member.index+1}] Join squad failed: {e}")
             await asyncio.sleep(1)
 
-        print(f"  Squad formed: {len(self.connections)} players (code: {squad_code[:20]}...)")
+        in_squad_count = sum(1 for c in self.connections if c.in_squad)
+        print(f"  Squad formed: {in_squad_count}/{len(self.connections)} players in squad")
         return True
 
     async def exploit_cycle(self) -> bool:
