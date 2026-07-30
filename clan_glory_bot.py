@@ -797,7 +797,7 @@ class GuestConnection:
         """Read and decode a join response packet from the server."""
         await asyncio.sleep(0.5)
         try:
-            resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=3.0)
+            resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=1.5)
             if resp:
                 resp_hex = resp.hex()
                 print(f"  [G{self.index+1}] {label} response: {len(resp_hex)} hex, header={resp_hex[:12]}")
@@ -822,158 +822,155 @@ class GuestConnection:
             print(f"  [G{self.index+1}] {label}: {e}")
         return {}
 
-    async def try_join_squad(self, owner_uid: str, code: str, squad_code: str = None):
-        """Try multiple join methods in order:
-        1. REAL GenJoinSquadsPacket from xC4.py (with binary blob + version info)
-        2. ArohiAccepted format (owner_uid + string code)
-        3. GenJoinGlobaL format (owner_uid + code)
-        Each method reads the server response.
+    async def _try_join_method(self, label: str, packet_bytes, channel: str = "online") -> bool:
+        """Send a join packet and check the response. Returns True if joined."""
+        await self.send_packet(packet_bytes, channel=channel)
+        await asyncio.sleep(0.3)
+        resp = await self._read_join_response(label)
+        if resp and isinstance(resp, dict):
+            field3 = None
+            for k, v in resp.items():
+                if k == '3':
+                    field3 = v.get('data') if isinstance(v, dict) else v
+            if field3 is None:
+                print(f"  [G{self.index+1}] ✅ {label}: accepted (no error field)")
+                self.in_squad = True
+                return True
+            elif field3 not in [79, 50, 94]:
+                print(f"  [G{self.index+1}] ✅ {label}: SUCCESS (field 3 = {field3})")
+                self.in_squad = True
+                return True
+            else:
+                print(f"  [G{self.index+1}] ❌ {label}: error {field3}")
+        return False
+
+    async def try_join_squad(self, owner_uid: str, team_code: str, squad_code: str = None):
+        """Try ALL join methods systematically. Returns True if any worked.
+        
+        Error codes seen:
+        - 79: GenJoinSquadsPacket with squad_code (wrong code format)
+        - 50: ArohiAccepted (wrong code or no invite pending)  
+        - 94: GenJoinGlobaL with team_code (wrong region or squad state)
         """
         methods_tried = 0
-
-        # Method 1: REAL GenJoinSquadsPacket (from xC4.py import)
-        # This has: 2.4=binary, 2.5=str(code), 2.6=6, 2.8=1, 2.9={version}
+        
+        # ── Method 1: GenJoinSquadsPacket with SHORT team_code (not squad_code!) ──
+        # The TCP bot uses short team codes for GenJoinSquadsPacket
         try:
-            code_to_use = squad_code if squad_code else code
-            print(f"  [G{self.index+1}] Method 1: GenJoinSquadsPacket(code={str(code_to_use)[:30]}...)")
-            packet = await GenJoinSquadsPacket(code_to_use, self.key, self.iv)
-            await self.send_packet(packet, channel="online")
-            resp = await self._read_join_response("GenJoinSquads")
+            print(f"  [G{self.index+1}] M1: GenJoinSquadsPacket(team_code={team_code})")
+            packet = await GenJoinSquadsPacket(team_code, self.key, self.iv)
+            if await self._try_join_method("GenJoinSquads(team)", packet):
+                return True
             methods_tried += 1
-            # Check for success: field 3 should NOT be an error code
-            if resp and isinstance(resp, dict):
-                field3 = None
-                for k, v in resp.items():
-                    if k == '3':
-                        field3 = v.get('data') if isinstance(v, dict) else v
-                if field3 and field3 != 79:
-                    print(f"  [G{self.index+1}] ✅ GenJoinSquadsPacket SUCCESS (field 3 = {field3})")
-                    self.in_squad = True
-                    return True
-                elif field3 == 79:
-                    print(f"  [G{self.index+1}] ❌ GenJoinSquadsPacket rejected (error 79)")
-                else:
-                    # No error field — might be success
-                    print(f"  [G{self.index+1}] ✅ GenJoinSquadsPacket accepted (no error)")
-                    self.in_squad = True
-                    return True
         except Exception as e:
-            print(f"  [G{self.index+1}] GenJoinSquadsPacket error: {e}")
+            print(f"  [G{self.index+1}] M1 error: {e}")
 
-        # Method 2: ArohiAccepted with team_code (short code)
-        try:
-            print(f"  [G{self.index+1}] Method 2: ArohiAccepted(owner={owner_uid}, team_code={str(code)[:20]}...)")
-            packet = await ArohiAccepted(owner_uid, code, self.key, self.iv)
-            await self.send_packet(packet, channel="online")
-            resp = await self._read_join_response("ArohiAccepted(team)")
-            methods_tried += 1
-            if resp and isinstance(resp, dict):
-                field3 = None
-                for k, v in resp.items():
-                    if k == '3':
-                        field3 = v.get('data') if isinstance(v, dict) else v
-                if field3 is not None and field3 not in [79, 50]:
-                    print(f"  [G{self.index+1}] ✅ ArohiAccepted SUCCESS (field 3 = {field3})")
-                    self.in_squad = True
-                    return True
-                elif field3 == 50:
-                    print(f"  [G{self.index+1}] ❌ ArohiAccepted: error 50 (wrong code format — need full squad_code)")
-                elif field3 == 79:
-                    print(f"  [G{self.index+1}] ❌ ArohiAccepted: error 79 (rejected)")
-        except Exception as e:
-            print(f"  [G{self.index+1}] ArohiAccepted error: {e}")
-
-        # Method 2b: ArohiAccepted with FULL squad_code (not just team_code)
-        if squad_code and squad_code != code:
+        # ── Method 2: GenJoinSquadsPacket with full squad_code ──
+        if squad_code:
             try:
-                print(f"  [G{self.index+1}] Method 2b: ArohiAccepted with squad_code={str(squad_code)[:30]}...")
-                packet = await ArohiAccepted(owner_uid, squad_code, self.key, self.iv)
-                await self.send_packet(packet, channel="online")
-                resp = await self._read_join_response("ArohiAccepted(squad)")
-                methods_tried += 1
-                if resp and isinstance(resp, dict):
-                    field3 = None
-                    for k, v in resp.items():
-                        if k == '3':
-                            field3 = v.get('data') if isinstance(v, dict) else v
-                    if field3 is not None and field3 not in [79, 50]:
-                        print(f"  [G{self.index+1}] ✅ ArohiAccepted+squad_code SUCCESS (field 3 = {field3})")
-                        self.in_squad = True
-                        return True
-                    elif field3 == 50:
-                        print(f"  [G{self.index+1}] ❌ ArohiAccepted+squad_code: error 50")
-                    elif field3 == 79:
-                        print(f"  [G{self.index+1}] ❌ ArohiAccepted+squad_code: error 79")
-            except Exception as e:
-                print(f"  [G{self.index+1}] ArohiAccepted+squad_code error: {e}")
-
-        # Method 2c: GenJoinGlobaL (from xC4.py) — owner + code format
-        try:
-            print(f"  [G{self.index+1}] Method 2c: GenJoinGlobaL(owner={owner_uid}, code={str(code)[:20]}...)")
-            packet = await GenJoinGlobaL(int(owner_uid), code, self.key, self.iv)
-            await self.send_packet(packet, channel="online")
-            resp = await self._read_join_response("GenJoinGlobaL")
-            methods_tried += 1
-            if resp and isinstance(resp, dict):
-                field3 = None
-                for k, v in resp.items():
-                    if k == '3':
-                        field3 = v.get('data') if isinstance(v, dict) else v
-                if field3 is not None and field3 not in [79, 50]:
-                    print(f"  [G{self.index+1}] ✅ GenJoinGlobaL SUCCESS (field 3 = {field3})")
-                    self.in_squad = True
-                    return True
-                else:
-                    print(f"  [G{self.index+1}] ❌ GenJoinGlobaL: field 3 = {field3}")
-        except ImportError:
-            print(f"  [G{self.index+1}] GenJoinGlobaL not available in xC4.py")
-        except Exception as e:
-            print(f"  [G{self.index+1}] GenJoinGlobaL error: {e}")
-
-        # Method 3: Try with squad_code (the full long code) instead of team_code
-        if squad_code and squad_code != code:
-            try:
-                print(f"  [G{self.index+1}] Method 3: GenJoinSquadsPacket with squad_code")
+                print(f"  [G{self.index+1}] M2: GenJoinSquadsPacket(squad_code={str(squad_code)[:25]}...)")
                 packet = await GenJoinSquadsPacket(squad_code, self.key, self.iv)
-                await self.send_packet(packet, channel="online")
-                resp = await self._read_join_response("GenJoinSquadCode")
-                methods_tried += 1
-                if resp and isinstance(resp, dict):
-                    field3 = None
-                    for k, v in resp.items():
-                        if k == '3':
-                            field3 = v.get('data') if isinstance(v, dict) else v
-                    if field3 and field3 != 79:
-                        print(f"  [G{self.index+1}] ✅ squad_code join SUCCESS (field 3 = {field3})")
-                        self.in_squad = True
-                        return True
-                    elif field3 == 79:
-                        print(f"  [G{self.index+1}] ❌ squad_code join rejected (error 79)")
-                    else:
-                        print(f"  [G{self.index+1}] ✅ squad_code join accepted (no error)")
-                        self.in_squad = True
-                        return True
-            except Exception as e:
-                print(f"  [G{self.index+1}] squad_code join error: {e}")
-
-        # Method 4: Try on CHAT channel too
-        try:
-            print(f"  [G{self.index+1}] Method 4: GenJoinSquadsPacket on chat channel")
-            packet = await GenJoinSquadsPacket(squad_code if squad_code else code, self.key, self.iv)
-            await self.send_packet(packet, channel="chat")
-            resp = await self._read_join_response("ChatJoin")
-            methods_tried += 1
-            if resp and isinstance(resp, dict):
-                field3 = None
-                for k, v in resp.items():
-                    if k == '3':
-                        field3 = v.get('data') if isinstance(v, dict) else v
-                if field3 is None or field3 != 79:
-                    print(f"  [G{self.index+1}] ✅ Chat channel join worked!")
-                    self.in_squad = True
+                if await self._try_join_method("GenJoinSquads(squad)", packet):
                     return True
+                methods_tried += 1
+            except Exception as e:
+                print(f"  [G{self.index+1}] M2 error: {e}")
+
+        # ── Method 3: ArohiAccepted with team_code ──
+        try:
+            print(f"  [G{self.index+1}] M3: ArohiAccepted(owner={owner_uid}, team_code={team_code})")
+            packet = await ArohiAccepted(owner_uid, team_code, self.key, self.iv)
+            if await self._try_join_method("ArohiAccepted(team)", packet):
+                return True
+            methods_tried += 1
         except Exception as e:
-            print(f"  [G{self.index+1}] Chat channel join error: {e}")
+            print(f"  [G{self.index+1}] M3 error: {e}")
+
+        # ── Method 4: ArohiAccepted with squad_code ──
+        if squad_code:
+            try:
+                print(f"  [G{self.index+1}] M4: ArohiAccepted(squad_code={str(squad_code)[:25]}...)")
+                packet = await ArohiAccepted(owner_uid, squad_code, self.key, self.iv)
+                if await self._try_join_method("ArohiAccepted(squad)", packet):
+                    return True
+                methods_tried += 1
+            except Exception as e:
+                print(f"  [G{self.index+1}] M4 error: {e}")
+
+        # ── Method 5: GenJoinGlobaL with team_code ──
+        try:
+            print(f"  [G{self.index+1}] M5: GenJoinGlobaL(owner={owner_uid}, team_code={team_code})")
+            packet = await GenJoinGlobaL(int(owner_uid), team_code, self.key, self.iv)
+            if await self._try_join_method("GenJoinGlobaL(team)", packet):
+                return True
+            methods_tried += 1
+        except Exception as e:
+            print(f"  [G{self.index+1}] M5 error: {e}")
+
+        # ── Method 6: GenJoinGlobaL with squad_code ──
+        if squad_code:
+            try:
+                print(f"  [G{self.index+1}] M6: GenJoinGlobaL(squad_code={str(squad_code)[:25]}...)")
+                packet = await GenJoinGlobaL(int(owner_uid), squad_code, self.key, self.iv)
+                if await self._try_join_method("GenJoinGlobaL(squad)", packet):
+                    return True
+                methods_tried += 1
+            except Exception as e:
+                print(f"  [G{self.index+1}] M6 error: {e}")
+
+        # ── Method 7: Custom join — owner + team_code + version (hybrid) ──
+        try:
+            print(f"  [G{self.index+1}] M7: Custom hybrid join (owner + team_code + version)")
+            fields = {
+                1: 4,
+                2: {
+                    1: int(owner_uid),
+                    4: bytes.fromhex("01090a0b121920"),
+                    5: str(team_code),
+                    6: 6,
+                    8: 1,
+                    9: {2: 800, 6: 11, 8: "1.111.1", 9: 5, 10: 1},
+                }
+            }
+            proto_hex = (await CrEaTe_ProTo(fields)).hex()
+            packet = await GeneRaTePk(proto_hex, "0515", self.key, self.iv)
+            if await self._try_join_method("HybridJoin", packet):
+                return True
+            methods_tried += 1
+        except Exception as e:
+            print(f"  [G{self.index+1}] M7 error: {e}")
+
+        # ── Method 8: GenJoinGlobaL with "ME" region instead of "OR" ──
+        try:
+            print(f"  [G{self.index+1}] M8: GenJoinGlobaL with ME region")
+            fields = {
+                1: 4,
+                2: {
+                    1: int(owner_uid),
+                    6: 1,
+                    8: 1,
+                    13: "en",
+                    15: str(team_code),
+                    16: "ME",
+                }
+            }
+            proto_hex = (await CrEaTe_ProTo(fields)).hex()
+            packet = await GeneRaTePk(proto_hex, "0515", self.key, self.iv)
+            if await self._try_join_method("GenJoinGlobaL(ME)", packet):
+                return True
+            methods_tried += 1
+        except Exception as e:
+            print(f"  [G{self.index+1}] M8 error: {e}")
+
+        # ── Method 9: Try on chat channel with best method ──
+        try:
+            print(f"  [G{self.index+1}] M9: GenJoinSquadsPacket on chat channel")
+            packet = await GenJoinSquadsPacket(team_code, self.key, self.iv)
+            if await self._try_join_method("GenJoinSquads(chat)", packet, channel="chat"):
+                return True
+            methods_tried += 1
+        except Exception as e:
+            print(f"  [G{self.index+1}] M9 error: {e}")
 
         print(f"  [G{self.index+1}] ⚠ All {methods_tried} join methods failed")
         self.in_squad = False
@@ -1193,14 +1190,14 @@ class ClanGloryBot:
 
         # Wait for invite packets to reach members
         print(f"  >> Waiting for invite packets to arrive...")
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
 
         # Step 3: Each member reads 0500 invite packet and accepts with ArohiAccepted
         # ArohiAccepted sends 0516 packet (not 0515) with owner_uid + invite_code
         for member in members:
             try:
                 print(f"  [G{member.index+1}] Reading invite packet...")
-                invite_data = await member.read_invite_code(timeout=10.0)
+                invite_data = await member.read_invite_code(timeout=4.0)
 
                 invite_code = invite_data.get("invite_code")
                 inviter_uid = invite_data.get("owner_uid") or owner_uid
