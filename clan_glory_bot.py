@@ -118,6 +118,20 @@ async def ArohiAccepted(uid, code, K, V):
     }
     return await GeneRaTePk((await CrEaTe_ProTo(fields)).hex(), "0515", K, V)
 
+
+async def AutH_Chat(T, uid, code, K, V):
+    """Authenticate squad chat — TCP bot calls this after joining squad."""
+    from xC4 import CrEaTe_ProTo, GeneRaTePk
+    fields = {
+        1: T,
+        2: {
+            1: int(uid),
+            3: "en",
+            4: str(code),
+        }
+    }
+    return await GeneRaTePk((await CrEaTe_ProTo(fields)).hex(), "1215", K, V)
+
 # ======================== HTTP API ========================
 
 HTTP_HEADERS = {
@@ -548,6 +562,23 @@ class GuestConnection:
         await self.send_packet(packet, channel="chat")
         await asyncio.sleep(PACKET_INTERVAL)
 
+    async def reset_squad(self):
+        """Leave any existing squad before forming a new one."""
+        fields = {
+            1: 7,
+            2: {
+                1: 12480598706,
+            }
+        }
+        proto_bytes = await CrEaTe_ProTo(fields)
+        pkt_type = get_packet_type(self.region)
+        packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
+        await self.send_packet(packet, channel="online")
+        await asyncio.sleep(0.5)
+        self.in_squad = False
+        self.in_match = False
+        self.squad_code = None
+
     async def open_squad(self, region: str) -> str:
         """
         OpEnSq — leader opens squad for matchmaking.
@@ -821,7 +852,13 @@ class ClanGloryBot:
 
         print(f"  Squad: Leader=G1({leader.account_uid}) -> {len(members)} members")
 
-        # Leader opens squad and READS the response to get squad_code
+        # Step 0: ALL members reset/leave any existing squad first
+        print(f"  >> Resetting all members to solo...")
+        for conn in self.connections:
+            await conn.reset_squad()
+        await asyncio.sleep(1)
+
+        # Step 1: Leader opens squad and READS the response to get squad_code
         squad_code = await leader.open_squad(self.region)
         await asyncio.sleep(2)
 
@@ -848,9 +885,13 @@ class ClanGloryBot:
                 if code:
                     # Use ArohiAccepted (TCP bot's invite accept) — includes leader UID
                     accept_packet = await ArohiAccepted(leader.account_uid, code, member.key, member.iv)
+                    await asyncio.sleep(1)
+                    # Authenticate squad chat (TCP bot does this after joining)
+                    chat_auth_packet = await AutH_Chat(3, leader.account_uid, code, member.key, member.iv)
+                    await member.send_packet(chat_auth_packet, channel="chat")
                     await member.send_packet(accept_packet)
                     member.in_squad = True
-                    print(f"  [G{member.index+1}] Accepted invite (code: {str(code)[:20]}...)")
+                    print(f"  [G{member.index+1}] Accepted invite + chat auth (code: {str(code)[:20]}...)")
                 else:
                     print(f"  [G{member.index+1}] No invite code — squad join may fail")
             except Exception as e:
@@ -869,10 +910,9 @@ class ClanGloryBot:
           4. ALL members leave team
           5. Wait CYCLE_DELAY before next cycle
         """
-        # Form squad (if not already)
-        if not all(c.in_squad for c in self.connections):
-            await self.form_squad()
-            await asyncio.sleep(3)
+        # Always form fresh squad each cycle
+        await self.form_squad()
+        await asyncio.sleep(3)
 
         # All members spam start_match packets (like the level bot)
         print(f"  >> Spamming start-match for {SPAM_DURATION}s...")
