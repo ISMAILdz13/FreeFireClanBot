@@ -51,7 +51,7 @@ from xC4 import (
     AuthClan, OpEnSq, SEnd_InV, GenJoinSquadsPacket, ExiT, cHSq,
     AutH_GlobAl, EnC_Uid, EnC_Vr,
     DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
-    EnC_PacKeT
+    EnC_PacKeT, GenJoinGlobaL
 )
 
 # ======================== TCP AUTH TOKEN BUILDER ========================
@@ -860,31 +860,75 @@ class GuestConnection:
         except Exception as e:
             print(f"  [G{self.index+1}] GenJoinSquadsPacket error: {e}")
 
-        # Method 2: ArohiAccepted format (from TCP bot)
-        # This has: 2.1=owner_uid, 2.3=owner_uid, 2.8=1, 2.9={version}, 2.10=str(code)
+        # Method 2: ArohiAccepted with team_code (short code)
         try:
-            print(f"  [G{self.index+1}] Method 2: ArohiAccepted(owner={owner_uid}, code={str(code)[:20]}...)")
+            print(f"  [G{self.index+1}] Method 2: ArohiAccepted(owner={owner_uid}, team_code={str(code)[:20]}...)")
             packet = await ArohiAccepted(owner_uid, code, self.key, self.iv)
             await self.send_packet(packet, channel="online")
-            resp = await self._read_join_response("ArohiAccepted")
+            resp = await self._read_join_response("ArohiAccepted(team)")
             methods_tried += 1
             if resp and isinstance(resp, dict):
                 field3 = None
                 for k, v in resp.items():
                     if k == '3':
                         field3 = v.get('data') if isinstance(v, dict) else v
-                if field3 and field3 != 79:
+                if field3 is not None and field3 not in [79, 50]:
                     print(f"  [G{self.index+1}] ✅ ArohiAccepted SUCCESS (field 3 = {field3})")
                     self.in_squad = True
                     return True
+                elif field3 == 50:
+                    print(f"  [G{self.index+1}] ❌ ArohiAccepted: error 50 (wrong code format — need full squad_code)")
                 elif field3 == 79:
-                    print(f"  [G{self.index+1}] ❌ ArohiAccepted rejected (error 79)")
-                else:
-                    print(f"  [G{self.index+1}] ✅ ArohiAccepted accepted (no error)")
-                    self.in_squad = True
-                    return True
+                    print(f"  [G{self.index+1}] ❌ ArohiAccepted: error 79 (rejected)")
         except Exception as e:
             print(f"  [G{self.index+1}] ArohiAccepted error: {e}")
+
+        # Method 2b: ArohiAccepted with FULL squad_code (not just team_code)
+        if squad_code and squad_code != code:
+            try:
+                print(f"  [G{self.index+1}] Method 2b: ArohiAccepted with squad_code={str(squad_code)[:30]}...")
+                packet = await ArohiAccepted(owner_uid, squad_code, self.key, self.iv)
+                await self.send_packet(packet, channel="online")
+                resp = await self._read_join_response("ArohiAccepted(squad)")
+                methods_tried += 1
+                if resp and isinstance(resp, dict):
+                    field3 = None
+                    for k, v in resp.items():
+                        if k == '3':
+                            field3 = v.get('data') if isinstance(v, dict) else v
+                    if field3 is not None and field3 not in [79, 50]:
+                        print(f"  [G{self.index+1}] ✅ ArohiAccepted+squad_code SUCCESS (field 3 = {field3})")
+                        self.in_squad = True
+                        return True
+                    elif field3 == 50:
+                        print(f"  [G{self.index+1}] ❌ ArohiAccepted+squad_code: error 50")
+                    elif field3 == 79:
+                        print(f"  [G{self.index+1}] ❌ ArohiAccepted+squad_code: error 79")
+            except Exception as e:
+                print(f"  [G{self.index+1}] ArohiAccepted+squad_code error: {e}")
+
+        # Method 2c: GenJoinGlobaL (from xC4.py) — owner + code format
+        try:
+            print(f"  [G{self.index+1}] Method 2c: GenJoinGlobaL(owner={owner_uid}, code={str(code)[:20]}...)")
+            packet = await GenJoinGlobaL(int(owner_uid), code, self.key, self.iv)
+            await self.send_packet(packet, channel="online")
+            resp = await self._read_join_response("GenJoinGlobaL")
+            methods_tried += 1
+            if resp and isinstance(resp, dict):
+                field3 = None
+                for k, v in resp.items():
+                    if k == '3':
+                        field3 = v.get('data') if isinstance(v, dict) else v
+                if field3 is not None and field3 not in [79, 50]:
+                    print(f"  [G{self.index+1}] ✅ GenJoinGlobaL SUCCESS (field 3 = {field3})")
+                    self.in_squad = True
+                    return True
+                else:
+                    print(f"  [G{self.index+1}] ❌ GenJoinGlobaL: field 3 = {field3}")
+        except ImportError:
+            print(f"  [G{self.index+1}] GenJoinGlobaL not available in xC4.py")
+        except Exception as e:
+            print(f"  [G{self.index+1}] GenJoinGlobaL error: {e}")
 
         # Method 3: Try with squad_code (the full long code) instead of team_code
         if squad_code and squad_code != code:
@@ -1132,15 +1176,19 @@ class ClanGloryBot:
         print(f"  Leader: owner={owner_uid}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}, team_code={team_code}")
 
         # Step 2: For each member — cHSq (configure) + SEnd_InV (invite)
-        # CRITICAL: Use INTERNAL UID (account_uid), NOT game UID (uid)
-        # The server only recognizes internal UIDs for squad operations
+        # cHSq uses the LEADER's UID (configuring own squad), SEnd_InV uses TARGET's UID
         for member in members:
-            print(f"  [G1] Configuring squad for G{member.index+1}...")
-            await leader.configure_squad(member.account_uid, self.region.lower(), squad_size)
+            print(f"  [G1] Configuring squad (leader_uid={leader.account_uid}) for G{member.index+1}...")
+            await leader.configure_squad(leader.account_uid, self.region.lower(), squad_size)
             await asyncio.sleep(0.3)
 
-            print(f"  [G1] Inviting G{member.index+1} (internal_uid={member.account_uid}, game_uid={member.uid})...")
+            print(f"  [G1] Inviting G{member.index+1} (internal_uid={member.account_uid})...")
+            # Send invite on BOTH channels — some regions use chat for invites
             await leader.send_invite(member.account_uid, self.region.lower(), squad_size)
+            await asyncio.sleep(0.5)
+            # Also try on chat channel
+            invite_pkt = await SEnd_InV(squad_size, member.account_uid, leader.key, leader.iv, self.region.upper())
+            await leader.send_packet(invite_pkt, channel="chat")
             await asyncio.sleep(1)
 
         # Wait for invite packets to reach members
