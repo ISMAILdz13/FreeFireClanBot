@@ -48,7 +48,7 @@ from Crypto.Util.Padding import pad, unpad
 from Pb2 import MajoRLoGinrEq_pb2, MajoRLoGinrEs_pb2, PorTs_pb2
 from xC4 import (
     CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
-    AuthClan, OpEnSq, SEnd_InV, GenJoinSquadsPacket, ExiT,
+    AuthClan, OpEnSq, SEnd_InV, GenJoinSquadsPacket, ExiT, cHSq,
     AutH_GlobAl, EnC_Uid, EnC_Vr,
     DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
     EnC_PacKeT
@@ -767,9 +767,15 @@ class GuestConnection:
         print(f"  [G{self.index+1}] Could not parse (tried 0500 search + all offsets + GeTSQDaTa)")
         return result
 
-    async def send_invite(self, target_uid: int, region: str):
-        """SEnd_InV — invite a player to squad."""
-        packet = await SEnd_InV(1, target_uid, self.key, self.iv, region)
+    async def send_invite(self, target_uid: int, region: str, squad_size: int = 3):
+        """SEnd_InV — invite a player to squad. Nu = squad size (3 for 3-player)."""
+        packet = await SEnd_InV(squad_size, target_uid, self.key, self.iv, region)
+        await self.send_packet(packet)
+        await asyncio.sleep(PACKET_INTERVAL)
+
+    async def configure_squad(self, target_uid: int, region: str, squad_size: int = 3):
+        """cHSq — configure squad for N players. Must be called BEFORE SEnd_InV."""
+        packet = await cHSq(squad_size, target_uid, self.key, self.iv, region)
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
 
@@ -951,21 +957,21 @@ class ClanGloryBot:
 
     async def form_squad(self) -> bool:
         """
-        Full squad formation (matches TCP bot flow):
+        Full squad formation (matches TCP bot flow exactly):
         1. ALL members reset/leave existing squad
         2. Leader opens squad (OpEnSq) -> extracts owner_uid, chat_code, squad_code
-        3. Leader invites each member (SEnd_InV) — optional, for server state
-        4. Members JOIN squad directly with GenJoinSquadsPacket(squad_code)
-        5. Members authenticate squad chat with AutH_Chat(3, owner_uid, chat_code)
-        No invite packet reading needed — GenJoinSquadsPacket joins by code.
+        3. For each member: Leader sends cHSq (configure squad) + SEnd_InV (invite)
+        4. Each member reads 0500 invite packet -> ArohiAccepted(owner_uid, invite_code)
+        5. Member authenticates squad chat with AutH_Chat(3, owner_uid, chat_code)
         """
         if not self.connections:
             return False
 
         leader = self.connections[0]
         members = self.connections[1:]
+        squad_size = len(self.connections)  # 3 for 3 guests
 
-        print(f"  Squad: Leader=G1({leader.account_uid}) -> {len(members)} members")
+        print(f"  Squad: Leader=G1({leader.account_uid}) -> {len(members)} members (size={squad_size})")
 
         # Step 0: ALL members reset/leave any existing squad first
         print(f"  >> Resetting all members to solo...")
@@ -983,38 +989,63 @@ class ClanGloryBot:
 
         print(f"  Leader: owner={owner_uid}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}")
 
-        # Step 2: Leader invites each member
+        # Step 2: For each member — cHSq (configure) + SEnd_InV (invite)
+        # TCP bot flow: OpEnSq -> cHSq(N, uid) -> SEnd_InV(N, uid)
         for member in members:
-            await leader.send_invite(member.account_uid, self.region)
-            await asyncio.sleep(1)
-        await asyncio.sleep(2)
+            print(f"  [G1] Configuring squad for G{member.index+1}...")
+            await leader.configure_squad(member.account_uid, self.region, squad_size)
+            await asyncio.sleep(0.3)
 
-        # Step 3: Members JOIN the squad directly using squad_code
-        # GenJoinSquadsPacket (0515) joins a squad by code — NO invite needed.
-        # This is the same method the TCP bot uses.
+            print(f"  [G1] Inviting G{member.index+1} (uid={member.account_uid})...")
+            await leader.send_invite(member.account_uid, self.region, squad_size)
+            await asyncio.sleep(1)
+
+        # Wait for invite packets to reach members
+        print(f"  >> Waiting for invite packets to arrive...")
+        await asyncio.sleep(3)
+
+        # Step 3: Each member reads 0500 invite packet and accepts with ArohiAccepted
+        # ArohiAccepted sends 0516 packet (not 0515) with owner_uid + invite_code
         for member in members:
             try:
-                if squad_code:
-                    # Primary: join squad directly with squad_code
-                    print(f"  [G{member.index+1}] Joining squad with code: {str(squad_code)[:30]}...")
-                    await member.join_squad(squad_code)
+                print(f"  [G{member.index+1}] Reading invite packet...")
+                invite_data = await member.read_invite_code(timeout=10.0)
+
+                invite_code = invite_data.get("invite_code")
+                inviter_uid = invite_data.get("owner_uid") or owner_uid
+
+                if invite_code:
+                    # Accept invite — 0516 packet with owner_uid + invite_code
+                    accept_packet = await ArohiAccepted(inviter_uid, invite_code, member.key, member.iv)
+                    await member.send_packet(accept_packet)
                     await asyncio.sleep(1)
 
-                    # Authenticate squad chat with chat_code
+                    # Authenticate squad chat
                     if chat_code:
                         chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
                         await member.send_packet(chat_auth_packet, channel="chat")
-                        print(f"  [G{member.index+1}] ✅ Joined + chat auth")
+                        print(f"  [G{member.index+1}] ✅ Accepted invite (code={str(invite_code)[:20]}...) + chat auth")
                     else:
-                        print(f"  [G{member.index+1}] ✅ Joined squad (no chat code)")
+                        print(f"  [G{member.index+1}] ✅ Accepted invite (no chat code)")
 
                     member.in_squad = True
+                elif squad_code:
+                    # Fallback: try GenJoinSquadsPacket with squad_code
+                    print(f"  [G{member.index+1}] No invite code, trying squad_code fallback...")
+                    await member.join_squad(squad_code)
+                    if chat_code:
+                        chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
+                        await member.send_packet(chat_auth_packet, channel="chat")
+                    member.in_squad = True
+                    print(f"  [G{member.index+1}] ⚠ Joined via squad_code fallback")
                 else:
-                    print(f"  [G{member.index+1}] ❌ No squad code — cannot join")
+                    print(f"  [G{member.index+1}] ❌ No invite code and no squad code — cannot join")
             except Exception as e:
-                print(f"  [G{member.index+1}] Join squad failed: {e}")
+                print(f"  [G{member.index+1}] Join failed: {e}")
             await asyncio.sleep(1)
 
+        # Leader is already in squad from OpEnSq
+        leader.in_squad = True
         in_squad_count = sum(1 for c in self.connections if c.in_squad)
         print(f"  Squad formed: {in_squad_count}/{len(self.connections)} players in squad")
         return True
