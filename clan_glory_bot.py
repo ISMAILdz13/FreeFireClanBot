@@ -214,23 +214,75 @@ async def get_login_data(major_login_payload: bytes, server_url: str, jwt_token:
 
 async def auto_join_clan(session: aiohttp.ClientSession, jwt: str, clan_id: int,
                          server_url: str, index: int):
-    """Send HTTP RequestClan to join the target clan."""
-    try:
-        # Build a simple protobuf: field 1 = clan_id
-        fields = {1: int(clan_id)}
-        proto = await CrEaTe_ProTo(fields)
-        enc_hex = EnC_PacKeT_sync(proto.hex(), AES_KEY, AES_IV)
-        async with session.post("https://clientbp.ggpolarbear.com/RequestClan",
-            data=bytes.fromhex(enc_hex),
-            headers={**HTTP_HEADERS, "Authorization": f"Bearer {jwt}"},
-            ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as r:
-            status = r.status
-            if status == 200:
-                print(f"  [G{index+1}] Joined clan {clan_id} (HTTP)")
+    """Send HTTP RequestJoinClan to join the target clan.
+    Tries multiple payload formats and server URLs (matching the reference bot)."""
+    import struct
+
+    def encode_varint(value):
+        buf = []
+        value = int(value)
+        while True:
+            towrite = value & 0x7f
+            value >>= 7
+            if value:
+                buf.append(towrite | 0x80)
             else:
-                print(f"  [G{index+1}] Clan join HTTP {status}")
-    except Exception as e:
-        print(f"  [G{index+1}] Clan join error: {e}")
+                buf.append(towrite)
+                break
+        return bytes(buf).hex()
+
+    gid_int = int(clan_id)
+    gid_str_bytes = str(gid_int).encode('utf-8')
+    gid_str_len = encode_varint(len(gid_str_bytes))
+    gid_varint = encode_varint(gid_int)
+
+    # Multiple payload formats (string and varint) like the reference bot
+    payload_formats = [
+        f"0a{gid_str_len}{gid_str_bytes.hex()}",  # field 1, string
+        f"12{gid_str_len}{gid_str_bytes.hex()}",  # field 2, string
+        f"10{gid_varint}",                        # field 2, varint
+        f"08{gid_varint}",                        # field 1, varint
+    ]
+
+    # Multiple server URLs
+    urls = [
+        f"{server_url}/RequestJoinClan",
+        "https://clientbp.common.ggbluefox.com/RequestJoinClan",
+        "https://clientbp.ggblueshark.com/RequestJoinClan",
+        "https://client.me.freefiremobile.com/RequestJoinClan",
+    ]
+
+    headers = {
+        "Authorization": f"Bearer {jwt}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; ASUS_Z01QD Build/PI)",
+        "X-Unity-Version": "2018.4.11f1",
+        "X-GA": "v1 1",
+        "ReleaseVersion": "OB54",
+        "Connection": "Keep-Alive",
+        "Accept-Encoding": "gzip",
+    }
+
+    for fmt_idx, payload_hex in enumerate(payload_formats, 1):
+        enc_hex = EnC_PacKeT_sync(payload_hex, AES_KEY, AES_IV)
+        for url in urls:
+            try:
+                async with session.post(url, data=bytes.fromhex(enc_hex),
+                    headers=headers, ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status in (200, 201):
+                        print(f"  [G{index+1}] Joined clan {clan_id} (HTTP fmt#{fmt_idx})")
+                        return True
+                    elif r.status == 400:
+                        # 400 might mean already in clan — check response
+                        body = await r.text()
+                        if "already" in body.lower():
+                            print(f"  [G{index+1}] Already in clan {clan_id}")
+                            return True
+            except:
+                continue
+    print(f"  [G{index+1}] Clan join failed (tried {len(payload_formats)} formats x {len(urls)} URLs)")
+    return False
 
 
 # ======================== TCP CONNECTION ========================
@@ -343,26 +395,23 @@ class GuestConnection:
         return True
 
     async def connect_tcp(self) -> bool:
-        """Connect to Online + Chat TCP servers using xAuThSTarTuP token."""
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-
+        """Connect to Online + Chat TCP servers using xAuThSTarTuP token.
+        NOTE: Free Fire game servers use RAW TCP — NO SSL/TLS."""
         try:
             # Build the proper TCP auth token using xAuThSTarTuP
             auth_token_hex = await build_tcp_auth_token(
                 self.account_uid, self.jwt, self.timestamp, self.key, self.iv)
             auth_token_bytes = bytes.fromhex(auth_token_hex)
 
-            # Online connection
+            # Online connection (raw TCP, no SSL)
             self.online_reader, self.online_writer = await asyncio.open_connection(
-                self.online_ip, self.online_port, ssl=ssl_ctx)
+                self.online_ip, self.online_port)
             self.online_writer.write(auth_token_bytes)
             await self.online_writer.drain()
 
-            # Chat (Whisper) connection
+            # Chat (Whisper) connection (raw TCP, no SSL)
             self.chat_reader, self.chat_writer = await asyncio.open_connection(
-                self.chat_ip, self.chat_port, ssl=ssl_ctx)
+                self.chat_ip, self.chat_port)
             self.chat_writer.write(auth_token_bytes)
             await self.chat_writer.drain()
 
