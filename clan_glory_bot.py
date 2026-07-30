@@ -935,10 +935,10 @@ class ClanGloryBot:
         Full squad formation (matches TCP bot flow):
         1. ALL members reset/leave existing squad
         2. Leader opens squad (OpEnSq) -> extracts owner_uid, chat_code, squad_code
-        3. Leader invites each member (SEnd_InV)
-        4. Each member READS their own invite packet -> extracts invite_code (5.8)
-        5. Member accepts with ArohiAccepted(owner_uid, invite_code)
-        6. Member authenticates squad chat with AutH_Chat(3, owner_uid, chat_code)
+        3. Leader invites each member (SEnd_InV) — optional, for server state
+        4. Members JOIN squad directly with GenJoinSquadsPacket(squad_code)
+        5. Members authenticate squad chat with AutH_Chat(3, owner_uid, chat_code)
+        No invite packet reading needed — GenJoinSquadsPacket joins by code.
         """
         if not self.connections:
             return False
@@ -970,45 +970,28 @@ class ClanGloryBot:
             await asyncio.sleep(1)
         await asyncio.sleep(2)
 
-        # Step 3: Each member reads THEIR OWN invite packet and accepts
-        # The real invite code (field 5.8) only comes in the 0500 invite packet
-        # that members receive — NOT from the leader's OpEnSq response.
+        # Step 3: Members JOIN the squad directly using squad_code
+        # GenJoinSquadsPacket (0515) joins a squad by code — NO invite needed.
+        # This is the same method the TCP bot uses.
         for member in members:
             try:
-                member_owner_uid = owner_uid
-                invite_code = None
-
-                # Member MUST read their own invite packet
-                print(f"  [G{member.index+1}] Reading invite packet...")
-                invite_data = await member.read_invite_code(timeout=6.0)
-                if invite_data.get("invite_code"):
-                    invite_code = invite_data["invite_code"]
-                if invite_data.get("owner_uid"):
-                    member_owner_uid = invite_data["owner_uid"]
-
-                if invite_code:
-                    # Accept invite with correct owner UID and invite code
-                    accept_packet = await ArohiAccepted(member_owner_uid, invite_code, member.key, member.iv)
-                    await member.send_packet(accept_packet)
+                if squad_code:
+                    # Primary: join squad directly with squad_code
+                    print(f"  [G{member.index+1}] Joining squad with code: {str(squad_code)[:30]}...")
+                    await member.join_squad(squad_code)
                     await asyncio.sleep(1)
 
-                    # Authenticate squad chat with chat_code (from leader's response)
+                    # Authenticate squad chat with chat_code
                     if chat_code:
-                        chat_auth_packet = await AutH_Chat(3, member_owner_uid, chat_code, member.key, member.iv)
+                        chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
                         await member.send_packet(chat_auth_packet, channel="chat")
-                        print(f"  [G{member.index+1}] ✅ Accepted + chat auth (invite: {str(invite_code)[:25]}...)")
+                        print(f"  [G{member.index+1}] ✅ Joined + chat auth")
                     else:
-                        print(f"  [G{member.index+1}] ✅ Accepted invite (no chat code)")
+                        print(f"  [G{member.index+1}] ✅ Joined squad (no chat code)")
 
                     member.in_squad = True
-                elif squad_code:
-                    # Fallback: try squad code from field 5.31
-                    accept_packet = await ArohiAccepted(member_owner_uid, squad_code, member.key, member.iv)
-                    await member.send_packet(accept_packet)
-                    member.in_squad = True
-                    print(f"  [G{member.index+1}] ⚠ Accepted with squad_code fallback: {str(squad_code)[:25]}...")
                 else:
-                    print(f"  [G{member.index+1}] ❌ No invite code — cannot join squad")
+                    print(f"  [G{member.index+1}] ❌ No squad code — cannot join")
             except Exception as e:
                 print(f"  [G{member.index+1}] Join squad failed: {e}")
             await asyncio.sleep(1)
