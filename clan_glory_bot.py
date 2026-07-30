@@ -466,10 +466,28 @@ class GuestConnection:
         self.squad_code = None
         self.team_code = None
 
-    async def open_squad(self, region: str) -> dict:
+    async def open_squad(self, region: str, squad_size: int = 2) -> dict:
         """OpEnSq — leader opens squad for matchmaking.
-        Reads the server response to extract owner_uid, chat_code, squad_code, team_code."""
-        packet = await OpEnSq(self.key, self.iv, region)
+        Uses custom fields with squad_size to set the number of additional member slots.
+        Original OpEnSq has field 2.3=1 (1 extra slot). We set it to squad_size-1."""
+        # Custom OpEnSq with squad_size
+        extra_slots = squad_size - 1  # leader + extra_slots = total squad size
+        fields = {
+            1: 1,
+            2: {
+                2: "\u0001",
+                3: extra_slots,  # Number of additional member slots (was hardcoded 1)
+                4: 1,
+                5: "en",
+                9: 1,
+                11: 1,
+                13: 1,
+                14: {2: 5756, 6: 11, 8: "1.111.5", 9: 2, 10: 4}
+            }
+        }
+        proto_bytes = await CrEaTe_ProTo(fields)
+        pkt_type = get_packet_type(region)
+        packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
         self.in_squad = True
@@ -832,17 +850,18 @@ class ClanGloryBot:
         await asyncio.sleep(1)
 
         # Step 2: Leader opens squad
-        leader_response = await leader.open_squad(self.region)
+        leader_response = await leader.open_squad(self.region, squad_size=len(self.connections))
         await asyncio.sleep(2)
 
-        # CRITICAL: Configure squad for N players using cHSq
-        # Without cHSq, the squad defaults to 2 slots (leader + 1)
-        # G2 can join but G3 gets error 79 (squad full)
+        # CRITICAL: Call cHSq for EACH member to reserve their slot
+        # TCP bot flow: OpEnSq → cHSq(N, target_uid) per target → SEnd_InV
+        # cHSq with target_uid reserves a slot for that specific player
         squad_size = len(self.connections)
-        print(f"  [G1] Configuring squad for {squad_size} players via cHSq...")
-        chsq_packet = await cHSq(squad_size, leader.account_uid, leader.key, leader.iv, self.region)
-        await leader.send_packet(chsq_packet, channel="online")
-        await asyncio.sleep(1)
+        for member in members:
+            print(f"  [G1] cHSq: reserving slot for G{member.index+1} (uid={member.account_uid}, squad_size={squad_size})...")
+            chsq_packet = await cHSq(squad_size, member.account_uid, leader.key, leader.iv, self.region)
+            await leader.send_packet(chsq_packet, channel="online")
+            await asyncio.sleep(0.5)
 
         team_code = leader_response.get("team_code")
         chat_code = leader_response.get("chat_code")
