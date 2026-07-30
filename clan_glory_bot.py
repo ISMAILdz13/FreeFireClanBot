@@ -677,6 +677,14 @@ class GuestConnection:
                         if '5' not in packet_json:
                             continue
                         field5 = packet_json['5']
+                        # DUMP full JSON for debugging
+                        import json as _json
+                        print(f"  [G{self.index+1}] === FULL OpEnSq JSON ===")
+                        try:
+                            print(_json.dumps(packet_json, indent=2, default=str)[:3000])
+                        except:
+                            print(str(packet_json)[:3000])
+                        print(f"  [G{self.index+1}] === END JSON ===")
                         if not isinstance(field5, dict) or 'data' not in field5:
                             continue
                         field5_data = field5['data']
@@ -795,10 +803,13 @@ class GuestConnection:
             fields = {1: 4, 2: {1: 1, 2: int(numeric_part)}}
             proto_hex = (await CrEaTe_ProTo(fields)).hex()
             simple_packet = await GeneRaTePk(proto_hex, '0515', self.key, self.iv)
-            await self.send_packet(simple_packet)
+            # Level bot sends join on WHISPER channel — try BOTH channels
+            await self.send_packet(simple_packet, channel="online")
+            await asyncio.sleep(0.2)
+            await self.send_packet(simple_packet, channel="chat")
             await asyncio.sleep(PACKET_INTERVAL)
             self.in_squad = True
-            print(f"  [G{self.index+1}] Joined via simple format (0515, field 2.2={numeric_part[:15]}...)")
+            print(f"  [G{self.index+1}] Joined via simple format (0515, sent on BOTH channels, field 2.2={numeric_part[:15]}...)")
             return
         except Exception as e:
             print(f"  [G{self.index+1}] Simple join failed ({e}), trying TCP bot format...")
