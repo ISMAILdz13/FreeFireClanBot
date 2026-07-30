@@ -317,6 +317,7 @@ class GuestConnection:
         self.in_match = False
         self.match_started = False
         self.squad_code = None
+        self.region = "ME"
         self._listen_task = None
 
     async def authenticate(self, session: aiohttp.ClientSession) -> bool:
@@ -661,6 +662,7 @@ class ClanGloryBot:
         async with aiohttp.ClientSession() as session:
             for i, guest in enumerate(guests):
                 conn = GuestConnection(guest, i)
+                conn.set_region(self.region)
 
                 if not await conn.authenticate(session):
                     continue
@@ -787,8 +789,9 @@ class ClanGloryBot:
         print(f"  Clan: {self.clan_id}")
         print(f"  Region: {self.region}")
         print(f"  Max cycles: {self.max_cycles}")
-        print(f"  Per cycle: ~{15 + 5 + REQUEUE_DELAY}s")
-        print(f"  Est total time: ~{(self.max_cycles * (15 + 5 + REQUEUE_DELAY)) // 60} min")
+        cycle_time = SPAM_DURATION + MATCH_WAIT + int(CYCLE_DELAY)
+        print(f"  Per cycle: ~{cycle_time}s")
+        print(f"  Est total time: ~{(self.max_cycles * cycle_time) // 60} min")
         print("=" * 60)
 
         if not await self.setup():
@@ -814,7 +817,7 @@ class ClanGloryBot:
                 await self.exploit_cycle()
 
                 # Inter-cycle delay
-                await asyncio.sleep(REQUEUE_DELAY)
+                await asyncio.sleep(CYCLE_DELAY)
 
             except KeyboardInterrupt:
                 print("\n  Stopped by user")
@@ -846,7 +849,7 @@ class ClanGloryBot:
 
 def main():
     import argparse
-    p = argparse.ArgumentParser(description="Clan Glory Bot — Clash Squad Exit Exploit")
+    p = argparse.ArgumentParser(description="Clan Glory Bot — Clash Squad Match Farm")
     p.add_argument("--clan-id", type=int, default=DEFAULT_CLAN_ID, help="Target clan ID")
     p.add_argument("--region", type=str, default=DEFAULT_REGION, help="Region (ME, IND, BR, SG, etc.)")
     p.add_argument("--cycles", type=int, default=DEFAULT_CYCLES, help="Max exploit cycles")
