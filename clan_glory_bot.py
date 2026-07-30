@@ -132,6 +132,72 @@ async def refresh_guest_token(session, uid: str, password: str) -> tuple:
         pass
     return None, None
 
+# ======================== CLAN JOIN API ========================
+
+def encode_varint(value: int) -> str:
+    """Encode an integer as protobuf varint hex string."""
+    result = []
+    while value > 0:
+        b = value & 0x7F
+        value >>= 7
+        if value > 0:
+            b |= 0x80
+        result.append(b)
+    return bytes(result).hex()
+
+
+def encrypt_api_payload(plain_hex: str) -> bytes:
+    """AES-CBC encrypt a hex payload for Free Fire HTTP API."""
+    cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
+    return cipher.encrypt(pad(bytes.fromhex(plain_hex), AES.block_size))
+
+
+API_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; ASUS_Z01QD Build/PI)",
+    "X-Unity-Version": "2018.4.11f1",
+    "X-GA": "v1 1",
+    "ReleaseVersion": "OB54",
+    "Connection": "Keep-Alive",
+    "Accept-Encoding": "gzip",
+}
+
+
+async def api_join_clan(session, jwt: str, clan_id: int, server_url: str) -> bool:
+    """Send RequestJoinClan via HTTP API."""
+    clan_id_varint = encode_varint(clan_id)
+    body = encrypt_api_payload(f"08{clan_id_varint}")
+    headers = {**API_HEADERS, "Authorization": f"Bearer {jwt}"}
+
+    urls = [
+        f"{server_url}/RequestJoinClan",
+        "https://clientbp.ggpolarbear.com/RequestJoinClan",
+        "https://clientbp.ggblueshark.com/RequestJoinClan",
+    ]
+    for url in urls:
+        try:
+            async with session.post(url, data=body, headers=headers, ssl=False,
+                                     timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    return True
+                text = await resp.text()
+                if "ALREADY" in text and "THIS" in text.upper():
+                    return True  # Already in this clan
+        except Exception:
+            continue
+    return False
+
+
+async def auto_join_clan(session, jwt: str, clan_id: int, server_url: str, guest_idx: int) -> bool:
+    """Auto-join target clan via HTTP API. Does NOT quit — 120m cooldown."""
+    joined = await api_join_clan(session, jwt, clan_id, server_url)
+    if joined:
+        print(f"  [G{guest_idx+1}] Clan join OK \u2713")
+        return True
+    print(f"  [G{guest_idx+1}] Already in another clan (120m cooldown — continuing anyway)")
+    return True  # Continue anyway — farming still works
+
+
 # ======================== AUTH ========================
 
 async def build_major_login(open_id: str, access_token: str) -> bytes:
