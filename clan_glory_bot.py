@@ -1,8 +1,8 @@
 """
-Clan Glory Bot — Clash Squad Exit Glitch Exploit
+Clan Glory Bot — Clash Squad Match Farm
 ==================================================
-Exploit: Enter Clash Squad match with clan members, immediately exit after
-match starts. System awards glory points for participation even on exit/loss.
+Farm clan glory by entering Clash Squad matches with clan members and
+letting the match complete. Based on the working level bot's match engine.
 Repeat hundreds of times for fast glory farming.
 
 Flow per cycle (~30-60 seconds):
@@ -80,9 +80,11 @@ AES_IV  = bytes([54, 111, 121, 90, 68, 114, 50, 50, 69, 51, 121, 99, 104, 106, 7
 DEFAULT_CLAN_ID    = 3100938923
 DEFAULT_REGION     = "ME"
 DEFAULT_CYCLES     = 200
-MATCHMAKING_WAIT   = 15   # seconds to wait for match to start
-POST_EXIT_WAIT     = 5    # seconds after exit for glory to credit
-REQUEUE_DELAY      = 3    # seconds between cycles
+SPAM_DURATION      = 18   # seconds to spam start_match packets (like level bot)
+SPAM_DELAY         = 0.2  # delay between start_match packets
+MATCH_WAIT         = 20   # seconds to wait for match to complete
+LEAVE_DELAY        = 2.0  # seconds after leaving team
+CYCLE_DELAY        = 3.0  # seconds between cycles
 RECONNECT_DELAY    = 3
 PACKET_INTERVAL    = 0.5  # seconds between TCP packets
 
@@ -538,31 +540,46 @@ class GuestConnection:
         await asyncio.sleep(PACKET_INTERVAL)
         self.in_squad = True
 
-    async def start_clash_squad(self, region: str):
-        """
-        Queue for Clash Squad match.
-        Uses FS packet (field 1=9) which starts matchmaking.
-        """
-        # Build match start packet — field 1 = 9 (start match)
+    async def spam_start_match(self, duration: float, delay: float):
+        """Spam start-match packets on the ONLINE socket for the given duration.
+        This matches the level bot's approach — field 1=9 triggers matchmaking.
+        Uses a fixed UID in field 2.1 (like the level bot's PacketBuilder.start_match)."""
+        import time as _time
         fields = {
             1: 9,
             2: {
-                1: self.account_uid,
+                1: 12480598706,  # Fixed UID (matches level bot's PacketBuilder)
             }
         }
         proto_bytes = await CrEaTe_ProTo(fields)
-        pkt_type = get_packet_type(region)
+        pkt_type = get_packet_type(self.region if hasattr(self, 'region') else "ME")
         packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
-        await self.send_packet(packet)
-        await asyncio.sleep(PACKET_INTERVAL)
-        self.in_match = True
 
-    async def exit_match(self):
-        """ExiT — immediately withdraw from match (the exploit)."""
-        packet = await ExiT(self.account_uid, self.key, self.iv)
-        await self.send_packet(packet)
-        await asyncio.sleep(PACKET_INTERVAL)
+        end_time = _time.time() + duration
+        sent = 0
+        while _time.time() < end_time and self.connected:
+            await self.send_packet(packet, channel="online")
+            sent += 1
+            await asyncio.sleep(delay)
+        self.in_match = True
+        return sent
+
+    async def leave_team(self):
+        """Leave squad — field 1=7 (matches level bot's PacketBuilder.leave_team)."""
+        fields = {
+            1: 7,
+            2: {
+                1: 12480598706,  # Fixed UID (matches level bot)
+            }
+        }
+        proto_bytes = await CrEaTe_ProTo(fields)
+        pkt_type = get_packet_type(self.region if hasattr(self, 'region') else "ME")
+        packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
+        await self.send_packet(packet, channel="whisper")
+        await asyncio.sleep(LEAVE_DELAY)
         self.in_match = False
+        self.in_squad = False
+        self.squad_code = None
 
     async def listen_online(self):
         """Background reader for Online TCP — detect match start/end + squad data."""
@@ -611,19 +628,17 @@ class ClanGloryBot:
       3. Leader queues Clash Squad
       4. Wait for matchmaking
       5. ALL members immediately exit/withdraw
-      6. Wait POST_EXIT_WAIT for glory to credit
+      6. Wait 5 for glory to credit
       7. Re-queue
     """
 
     def __init__(self, clan_id: int = DEFAULT_CLAN_ID, region: str = DEFAULT_REGION,
                  cycles: int = DEFAULT_CYCLES,
-                 matchmaking_wait: int = MATCHMAKING_WAIT,
-                 post_exit_wait: int = POST_EXIT_WAIT):
+        ):
         self.clan_id = clan_id
         self.region = region
         self.max_cycles = cycles
-        self.matchmaking_wait = matchmaking_wait
-        self.post_exit_wait = post_exit_wait
+        # timing now module-level constants
         self.connections: List[GuestConnection] = []
         self.running = False
         self.cycle_count = 0
@@ -717,46 +732,43 @@ class ClanGloryBot:
 
     async def exploit_cycle(self) -> bool:
         """
-        Single exploit cycle:
-          1. Form squad (with proper squad_code)
-          2. Queue Clash Squad
-          3. Wait for matchmaking
-          4. ALL exit immediately
-          5. Wait for glory credit
+        Single glory cycle (based on the level bot's working approach):
+          1. Form squad (if not already)
+          2. ALL members spam start_match on online socket for SPAM_DURATION seconds
+          3. Wait MATCH_WAIT seconds for match to complete
+          4. ALL members leave team
+          5. Wait CYCLE_DELAY before next cycle
         """
         # Form squad (if not already)
         if not all(c.in_squad for c in self.connections):
             await self.form_squad()
             await asyncio.sleep(3)
 
-        # Queue Clash Squad — leader starts match
-        leader = self.connections[0]
-        print(f"  >> Queueing Clash Squad...")
-
-        # All members send match start
+        # All members spam start_match packets (like the level bot)
+        print(f"  >> Spamming start-match for {SPAM_DURATION}s...")
+        tasks = []
         for conn in self.connections:
-            await conn.start_clash_squad(self.region)
+            tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        total_packets = sum(r for r in results if isinstance(r, int))
+        print(f"  >> Sent {total_packets} start-match packets total")
+
+        # Wait for match to complete
+        print(f"  >> Waiting {MATCH_WAIT}s for match completion...")
+        await asyncio.sleep(MATCH_WAIT)
+
+        # ALL members leave team
+        print(f"  >> Leaving team...")
+        for conn in self.connections:
+            try:
+                await conn.leave_team()
+            except Exception as e:
+                print(f"  [G{conn.index+1}] Leave failed: {e}")
             await asyncio.sleep(0.3)
 
-        # Wait for matchmaking
-        print(f"  >> Waiting {self.matchmaking_wait}s for match...")
-        await asyncio.sleep(self.matchmaking_wait)
-
-        # EXPLOIT: ALL members exit immediately
-        print(f"  >> EXITING MATCH (exploit)...")
-        for conn in self.connections:
-            await conn.exit_match()
-            await asyncio.sleep(0.2)
-
-        # Reset squad state (exiting match disbands squad)
-        for conn in self.connections:
-            conn.in_squad = False
-            conn.in_match = False
-            conn.squad_code = None
-
         # Wait for glory to credit
-        print(f"  >> Waiting {self.post_exit_wait}s for glory credit...")
-        await asyncio.sleep(self.post_exit_wait)
+        print(f"  >> Waiting {CYCLE_DELAY}s before next cycle...")
+        await asyncio.sleep(CYCLE_DELAY)
 
         # Estimate glory (varies, but participation gives some points)
         glory_per_cycle = len(self.connections) * random.randint(5, 15)
@@ -775,8 +787,8 @@ class ClanGloryBot:
         print(f"  Clan: {self.clan_id}")
         print(f"  Region: {self.region}")
         print(f"  Max cycles: {self.max_cycles}")
-        print(f"  Per cycle: ~{self.matchmaking_wait + self.post_exit_wait + REQUEUE_DELAY}s")
-        print(f"  Est total time: ~{(self.max_cycles * (self.matchmaking_wait + self.post_exit_wait + REQUEUE_DELAY)) // 60} min")
+        print(f"  Per cycle: ~{15 + 5 + REQUEUE_DELAY}s")
+        print(f"  Est total time: ~{(self.max_cycles * (15 + 5 + REQUEUE_DELAY)) // 60} min")
         print("=" * 60)
 
         if not await self.setup():
@@ -838,13 +850,13 @@ def main():
     p.add_argument("--clan-id", type=int, default=DEFAULT_CLAN_ID, help="Target clan ID")
     p.add_argument("--region", type=str, default=DEFAULT_REGION, help="Region (ME, IND, BR, SG, etc.)")
     p.add_argument("--cycles", type=int, default=DEFAULT_CYCLES, help="Max exploit cycles")
-    p.add_argument("--match-wait", type=int, default=MATCHMAKING_WAIT, help="Matchmaking wait (seconds)")
-    p.add_argument("--post-exit-wait", type=int, default=POST_EXIT_WAIT, help="Post-exit wait (seconds)")
+    p.add_argument("--match-wait", type=int, default=15, help="Matchmaking wait (seconds)")
+    p.add_argument("--post-exit-wait", type=int, default=5, help="Post-exit wait (seconds)")
     args = p.parse_args()
 
     bot = ClanGloryBot(
         clan_id=args.clan_id, region=args.region, cycles=args.cycles,
-        matchmaking_wait=args.match_wait, post_exit_wait=args.post_exit_wait
+
     )
 
     # Handle Ctrl+C
