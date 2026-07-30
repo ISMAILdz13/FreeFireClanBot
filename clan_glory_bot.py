@@ -793,79 +793,151 @@ class GuestConnection:
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
 
-    async def join_squad(self, code: str):
-        """Join squad with team_code (short number from field 5.6.4) or squad_code.
-        Uses GenJoinSquadsPacket format: {1: 4, 2: {1: 1, 2: int(code)}}
-        Sends on BOTH online + chat channels (level bot uses whisper/chat).
-        """
-        # If code has underscore, take numeric part; otherwise use as-is
-        numeric_part = code.split('_')[0] if '_' in code else code
+    async def _read_join_response(self, label: str = "Join") -> dict:
+        """Read and decode a join response packet from the server."""
+        await asyncio.sleep(0.5)
         try:
-            from xC4 import CrEaTe_ProTo, GeneRaTePk
-            fields = {1: 4, 2: {1: 1, 2: int(numeric_part)}}
-            proto_hex = (await CrEaTe_ProTo(fields)).hex()
-            simple_packet = await GeneRaTePk(proto_hex, '0515', self.key, self.iv)
-            # TCP bot sends join on ONLINE channel
-            await self.send_packet(simple_packet, channel="online")
-            await asyncio.sleep(PACKET_INTERVAL)
-            self.in_squad = True
-            print(f"  [G{self.index+1}] Join packet sent (0515, code={numeric_part}, online channel)")
-            # Read server response to check if join was accepted
-            await asyncio.sleep(1.0)
-            try:
-                resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=2.0)
-                if resp:
-                    resp_hex = resp.hex()
-                    print(f"  [G{self.index+1}] Join response: {len(resp_hex)} hex chars, header={resp_hex[:12]}")
-                    # Try to decode
-                    for skip in [10, 12, 8, 14, 6]:
-                        try:
-                            payload = resp_hex[skip:]
-                            if len(payload) < 10:
-                                continue
-                            json_str = await DeCode_PackEt(payload)
-                            if json_str:
-                                parsed = json.loads(json_str)
-                                print(f"  [G{self.index+1}] Join response decoded: {str(parsed)[:500]}")
-                                break
-                        except:
+            resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=3.0)
+            if resp:
+                resp_hex = resp.hex()
+                print(f"  [G{self.index+1}] {label} response: {len(resp_hex)} hex, header={resp_hex[:12]}")
+                for skip in [10, 12, 8, 14, 6]:
+                    try:
+                        payload = resp_hex[skip:]
+                        if len(payload) < 10:
                             continue
-                else:
-                    print(f"  [G{self.index+1}] No join response (server silent)")
-            except asyncio.TimeoutError:
-                print(f"  [G{self.index+1}] No join response (timeout)")
+                        json_str = await DeCode_PackEt(payload)
+                        if json_str:
+                            parsed = json.loads(json_str)
+                            print(f"  [G{self.index+1}] {label} decoded: {str(parsed)[:500]}")
+                            return parsed
+                    except:
+                        continue
+                print(f"  [G{self.index+1}] {label} response: could not decode")
+            else:
+                print(f"  [G{self.index+1}] {label}: connection closed")
+        except asyncio.TimeoutError:
+            print(f"  [G{self.index+1}] {label}: no response (timeout)")
         except Exception as e:
-            print(f"  [G{self.index+1}] Join error: {e}")
-            self.in_squad = False
+            print(f"  [G{self.index+1}] {label}: {e}")
+        return {}
+
+    async def try_join_squad(self, owner_uid: str, code: str, squad_code: str = None):
+        """Try multiple join methods in order:
+        1. REAL GenJoinSquadsPacket from xC4.py (with binary blob + version info)
+        2. ArohiAccepted format (owner_uid + string code)
+        3. GenJoinGlobaL format (owner_uid + code)
+        Each method reads the server response.
+        """
+        methods_tried = 0
+
+        # Method 1: REAL GenJoinSquadsPacket (from xC4.py import)
+        # This has: 2.4=binary, 2.5=str(code), 2.6=6, 2.8=1, 2.9={version}
+        try:
+            code_to_use = squad_code if squad_code else code
+            print(f"  [G{self.index+1}] Method 1: GenJoinSquadsPacket(code={str(code_to_use)[:30]}...)")
+            packet = await GenJoinSquadsPacket(code_to_use, self.key, self.iv)
+            await self.send_packet(packet, channel="online")
+            resp = await self._read_join_response("GenJoinSquads")
+            methods_tried += 1
+            # Check for success: field 3 should NOT be an error code
+            if resp and isinstance(resp, dict):
+                field3 = None
+                for k, v in resp.items():
+                    if k == '3':
+                        field3 = v.get('data') if isinstance(v, dict) else v
+                if field3 and field3 != 79:
+                    print(f"  [G{self.index+1}] ✅ GenJoinSquadsPacket SUCCESS (field 3 = {field3})")
+                    self.in_squad = True
+                    return True
+                elif field3 == 79:
+                    print(f"  [G{self.index+1}] ❌ GenJoinSquadsPacket rejected (error 79)")
+                else:
+                    # No error field — might be success
+                    print(f"  [G{self.index+1}] ✅ GenJoinSquadsPacket accepted (no error)")
+                    self.in_squad = True
+                    return True
+        except Exception as e:
+            print(f"  [G{self.index+1}] GenJoinSquadsPacket error: {e}")
+
+        # Method 2: ArohiAccepted format (from TCP bot)
+        # This has: 2.1=owner_uid, 2.3=owner_uid, 2.8=1, 2.9={version}, 2.10=str(code)
+        try:
+            print(f"  [G{self.index+1}] Method 2: ArohiAccepted(owner={owner_uid}, code={str(code)[:20]}...)")
+            packet = await ArohiAccepted(owner_uid, code, self.key, self.iv)
+            await self.send_packet(packet, channel="online")
+            resp = await self._read_join_response("ArohiAccepted")
+            methods_tried += 1
+            if resp and isinstance(resp, dict):
+                field3 = None
+                for k, v in resp.items():
+                    if k == '3':
+                        field3 = v.get('data') if isinstance(v, dict) else v
+                if field3 and field3 != 79:
+                    print(f"  [G{self.index+1}] ✅ ArohiAccepted SUCCESS (field 3 = {field3})")
+                    self.in_squad = True
+                    return True
+                elif field3 == 79:
+                    print(f"  [G{self.index+1}] ❌ ArohiAccepted rejected (error 79)")
+                else:
+                    print(f"  [G{self.index+1}] ✅ ArohiAccepted accepted (no error)")
+                    self.in_squad = True
+                    return True
+        except Exception as e:
+            print(f"  [G{self.index+1}] ArohiAccepted error: {e}")
+
+        # Method 3: Try with squad_code (the full long code) instead of team_code
+        if squad_code and squad_code != code:
+            try:
+                print(f"  [G{self.index+1}] Method 3: GenJoinSquadsPacket with squad_code")
+                packet = await GenJoinSquadsPacket(squad_code, self.key, self.iv)
+                await self.send_packet(packet, channel="online")
+                resp = await self._read_join_response("GenJoinSquadCode")
+                methods_tried += 1
+                if resp and isinstance(resp, dict):
+                    field3 = None
+                    for k, v in resp.items():
+                        if k == '3':
+                            field3 = v.get('data') if isinstance(v, dict) else v
+                    if field3 and field3 != 79:
+                        print(f"  [G{self.index+1}] ✅ squad_code join SUCCESS (field 3 = {field3})")
+                        self.in_squad = True
+                        return True
+                    elif field3 == 79:
+                        print(f"  [G{self.index+1}] ❌ squad_code join rejected (error 79)")
+                    else:
+                        print(f"  [G{self.index+1}] ✅ squad_code join accepted (no error)")
+                        self.in_squad = True
+                        return True
+            except Exception as e:
+                print(f"  [G{self.index+1}] squad_code join error: {e}")
+
+        # Method 4: Try on CHAT channel too
+        try:
+            print(f"  [G{self.index+1}] Method 4: GenJoinSquadsPacket on chat channel")
+            packet = await GenJoinSquadsPacket(squad_code if squad_code else code, self.key, self.iv)
+            await self.send_packet(packet, channel="chat")
+            resp = await self._read_join_response("ChatJoin")
+            methods_tried += 1
+            if resp and isinstance(resp, dict):
+                field3 = None
+                for k, v in resp.items():
+                    if k == '3':
+                        field3 = v.get('data') if isinstance(v, dict) else v
+                if field3 is None or field3 != 79:
+                    print(f"  [G{self.index+1}] ✅ Chat channel join worked!")
+                    self.in_squad = True
+                    return True
+        except Exception as e:
+            print(f"  [G{self.index+1}] Chat channel join error: {e}")
+
+        print(f"  [G{self.index+1}] ⚠ All {methods_tried} join methods failed")
+        self.in_squad = False
+        return False
 
     async def accept_invite(self, owner_uid: str, invite_code: str):
-        """Accept squad invite — TCP bot's ArohiAccepted format.
-        field 1=4, 2.1=owner_uid, 2.3=owner_uid, 2.8=1, 2.9=version, 2.10=str(code)
-        """
-        fields = {
-            1: 4,
-            2: {
-                1: int(owner_uid) if owner_uid else 1,
-                3: int(owner_uid) if owner_uid else 1,
-                8: 1,
-                9: {
-                    2: 161,
-                    4: "y[WW",
-                    6: 11,
-                    8: "1.114.18",
-                    9: 3,
-                    10: 1
-                },
-                10: str(invite_code),
-            }
-        }
-        proto_bytes = await CrEaTe_ProTo(fields)
-        pkt_type = get_packet_type(self.region if hasattr(self, 'region') else "ME")
-        packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
-        await self.send_packet(packet, channel="online")
-        await asyncio.sleep(PACKET_INTERVAL)
-        self.in_squad = True
-        print(f"  [G{self.index+1}] Accept invite sent (ArohiAccepted format)")
+        """Accept squad invite — wrapper for try_join_squad."""
+        await self.try_join_squad(owner_uid, invite_code)
 
     async def spam_start_match(self, duration: float, delay: float):
         """Spam start-match packets on the ONLINE socket for the given duration.
@@ -1100,25 +1172,13 @@ class ClanGloryBot:
                         print(f"  [G{member.index+1}] ✅ Accepted invite (no chat code)")
 
                     member.in_squad = True
-                elif team_code:
-                    # Fallback 1: ArohiAccepted format with team_code as string code
-                    # This is the TCP bot's exact format: {1: 4, 2: {1: owner_uid, 3: owner_uid, 8: 1, 9: {version}, 10: str(code)}}
-                    print(f"  [G{member.index+1}] No invite arrived. Trying ArohiAccepted with team_code: {team_code}")
-                    await member.accept_invite(owner_uid, team_code)
-                    if chat_code:
+                elif team_code or squad_code:
+                    # Fallback: try ALL join methods (GenJoinSquadsPacket, ArohiAccepted, etc.)
+                    print(f"  [G{member.index+1}] No invite arrived. Trying all join methods...")
+                    joined = await member.try_join_squad(owner_uid, team_code or "", squad_code)
+                    if joined and chat_code:
                         chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
                         await member.send_packet(chat_auth_packet, channel="chat")
-                    member.in_squad = True
-                    print(f"  [G{member.index+1}] ✅ ArohiAccepted sent with team_code ({team_code})")
-                elif squad_code:
-                    # Fallback 2: ArohiAccepted with squad_code
-                    print(f"  [G{member.index+1}] Trying ArohiAccepted with squad_code...")
-                    await member.accept_invite(owner_uid, squad_code)
-                    if chat_code:
-                        chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
-                        await member.send_packet(chat_auth_packet, channel="chat")
-                    member.in_squad = True
-                    print(f"  [G{member.index+1}] ⚠ ArohiAccepted sent with squad_code")
                 else:
                     print(f"  [G{member.index+1}] ❌ No invite code and no squad code — cannot join")
             except Exception as e:
