@@ -413,7 +413,9 @@ class GuestConnection:
                             result["owner_uid"] = str(f1['data'])
                         f8 = field5_data.get('8', {})
                         if isinstance(f8, dict) and 'data' in f8:
-                            result["invite_code"] = str(f8['data'])
+                            val = str(f8['data'])
+                            if len(val) > 10:
+                                result["invite_code"] = val
                         if result["invite_code"]:
                             print(f"  [G{self.index+1}] Found at 0500@{idx}+{skip} ({attempt_name}): owner={result['owner_uid']}, invite={result['invite_code'][:25]}...")
                             return result
@@ -448,7 +450,9 @@ class GuestConnection:
                         result["owner_uid"] = str(f1['data'])
                     f8 = field5_data.get('8', {})
                     if isinstance(f8, dict) and 'data' in f8:
-                        result["invite_code"] = str(f8['data'])
+                        val = str(f8['data'])
+                        if len(val) > 10:
+                            result["invite_code"] = val
                     if result["invite_code"]:
                         print(f"  [G{self.index+1}] Found at offset {offset} ({attempt_name}): owner={result['owner_uid']}, invite={result['invite_code'][:25]}...")
                         return result
@@ -678,7 +682,12 @@ class GuestConnection:
                             result["owner_uid"] = str(f1['data'])
                         f8 = field5_data.get('8', {})
                         if isinstance(f8, dict) and 'data' in f8:
-                            result["invite_code"] = str(f8['data'])
+                            val = str(f8['data'])
+                            # Only accept if it looks like a real invite code (long string)
+                            if len(val) > 10 and '_' in val:
+                                result["invite_code"] = val
+                            else:
+                                print(f"  [G{self.index+1}] Field 5.8 = '{val}' (not a real invite code, skipping)")
                         f17 = field5_data.get('17', {})
                         if isinstance(f17, dict) and 'data' in f17:
                             result["chat_code"] = str(f17['data'])
@@ -720,7 +729,9 @@ class GuestConnection:
                         result["owner_uid"] = str(f1['data'])
                     f8 = field5_data.get('8', {})
                     if isinstance(f8, dict) and 'data' in f8:
-                        result["invite_code"] = str(f8['data'])
+                        val = str(f8['data'])
+                        if len(val) > 10 and '_' in val:
+                            result["invite_code"] = val
                     f17 = field5_data.get('17', {})
                     if isinstance(f17, dict) and 'data' in f17:
                         result["chat_code"] = str(f17['data'])
@@ -949,10 +960,9 @@ class ClanGloryBot:
 
         owner_uid = leader_response.get("owner_uid") or str(leader.account_uid)
         chat_code = leader_response.get("chat_code")
-        invite_code_from_leader = leader_response.get("invite_code")
         squad_code = leader_response.get("squad_code")
 
-        print(f"  Leader: owner={owner_uid}, invite={'Y' if invite_code_from_leader else 'N'}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}")
+        print(f"  Leader: owner={owner_uid}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}")
 
         # Step 2: Leader invites each member
         for member in members:
@@ -960,20 +970,21 @@ class ClanGloryBot:
             await asyncio.sleep(1)
         await asyncio.sleep(2)
 
-        # Step 3: Each member reads invite packet and accepts
+        # Step 3: Each member reads THEIR OWN invite packet and accepts
+        # The real invite code (field 5.8) only comes in the 0500 invite packet
+        # that members receive — NOT from the leader's OpEnSq response.
         for member in members:
             try:
-                invite_code = invite_code_from_leader
                 member_owner_uid = owner_uid
+                invite_code = None
 
-                if not invite_code:
-                    # Member reads their own invite packet to get invite code (field 5.8)
-                    print(f"  [G{member.index+1}] Reading invite packet...")
-                    invite_data = await member.read_invite_code(timeout=5.0)
-                    if invite_data.get("invite_code"):
-                        invite_code = invite_data["invite_code"]
-                    if invite_data.get("owner_uid"):
-                        member_owner_uid = invite_data["owner_uid"]
+                # Member MUST read their own invite packet
+                print(f"  [G{member.index+1}] Reading invite packet...")
+                invite_data = await member.read_invite_code(timeout=6.0)
+                if invite_data.get("invite_code"):
+                    invite_code = invite_data["invite_code"]
+                if invite_data.get("owner_uid"):
+                    member_owner_uid = invite_data["owner_uid"]
 
                 if invite_code:
                     # Accept invite with correct owner UID and invite code
