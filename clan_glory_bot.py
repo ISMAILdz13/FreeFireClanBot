@@ -56,7 +56,7 @@ from Crypto.Util.Padding import pad, unpad
 from Pb2 import MajoRLoGinrEq_pb2, MajoRLoGinrEs_pb2, PorTs_pb2
 from xC4 import (
     CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
-    AuthClan, OpEnSq, AutH_GlobAl, ExiT,
+    AuthClan, OpEnSq, AutH_GlobAl, ExiT, cHSq,
     DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
     EnC_PacKeT, EnC_Uid, EnC_Vr,
 )
@@ -835,6 +835,15 @@ class ClanGloryBot:
         leader_response = await leader.open_squad(self.region)
         await asyncio.sleep(2)
 
+        # CRITICAL: Configure squad for N players using cHSq
+        # Without cHSq, the squad defaults to 2 slots (leader + 1)
+        # G2 can join but G3 gets error 79 (squad full)
+        squad_size = len(self.connections)
+        print(f"  [G1] Configuring squad for {squad_size} players via cHSq...")
+        chsq_packet = await cHSq(squad_size, leader.account_uid, leader.key, leader.iv, self.region)
+        await leader.send_packet(chsq_packet, channel="online")
+        await asyncio.sleep(1)
+
         team_code = leader_response.get("team_code")
         chat_code = leader_response.get("chat_code")
         squad_code = leader_response.get("squad_code")
@@ -862,20 +871,44 @@ class ClanGloryBot:
             return False
 
         # Step 3: All members join DIRECTLY using team_code
-        for member in members:
+        # Add longer delay between joins (server needs time to register each member)
+        for i, member in enumerate(members):
             if not member.connected:
                 continue
+            # First member joins immediately, subsequent members wait longer
+            if i > 0:
+                print(f"  Waiting 3s before next member join (server sync)...")
+                await asyncio.sleep(3)
+            
             print(f"  [G{member.index+1}] Joining team {team_code}...")
             joined = await member.join_team(team_code)
             if joined:
                 print(f"  [G{member.index+1}] In squad")
             else:
+                # Retry 1: with squad_code (extract numeric part before underscore)
                 if squad_code:
-                    print(f"  [G{member.index+1}] Retrying with squad_code...")
-                    joined = await member.join_team(str(squad_code))
+                    numeric_part = ""
+                    for ch in str(squad_code):
+                        if ch.isdigit():
+                            numeric_part += ch
+                        else:
+                            break
+                    if numeric_part and numeric_part != team_code:
+                        print(f"  [G{member.index+1}] Retrying with squad_code numeric: {numeric_part[:20]}...")
+                        await asyncio.sleep(2)
+                        joined = await member.join_team(numeric_part)
+                        if joined:
+                            print(f"  [G{member.index+1}] In squad (via squad_code)")
+                
+                # Retry 2: wait and try again with original team_code (server might be slow)
+                if not joined:
+                    print(f"  [G{member.index+1}] Retrying in 5s (server sync delay)...")
+                    await asyncio.sleep(5)
+                    joined = await member.join_team(team_code)
                     if joined:
-                        print(f"  [G{member.index+1}] In squad (via squad_code)")
-            await asyncio.sleep(1)
+                        print(f"  [G{member.index+1}] In squad (retry)")
+                    else:
+                        print(f"  [G{member.index+1}] ❌ Failed to join after retries")
 
         in_squad_count = sum(1 for c in self.connections if c.in_squad)
         print(f"  Squad formed: {in_squad_count}/{len(self.connections)} players in squad")
