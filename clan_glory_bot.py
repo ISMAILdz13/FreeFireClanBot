@@ -1105,6 +1105,31 @@ class ClanGloryBot:
         leader.in_squad = True
         in_squad_count = sum(1 for c in self.connections if c.in_squad)
         print(f"  Squad formed: {in_squad_count}/{len(self.connections)} players in squad")
+        
+        # Check if G1 (leader) received squad member join notifications
+        print(f"  >> Checking leader socket for squad updates...")
+        try:
+            for _ in range(3):
+                g1_data = await asyncio.wait_for(leader.online_reader.read(9999), timeout=2.0)
+                if g1_data:
+                    g1_hex = g1_data.hex()
+                    print(f"  [G1] Squad update: {len(g1_hex)} hex, header={g1_hex[:16]}")
+                    for skip in [10, 12, 8, 14, 6]:
+                        try:
+                            payload = g1_hex[skip:]
+                            if len(payload) < 10:
+                                continue
+                            json_str = await DeCode_PackEt(payload)
+                            if json_str:
+                                parsed = json.loads(json_str)
+                                print(f"  [G1] Decoded: {str(parsed)[:300]}")
+                                break
+                        except:
+                            continue
+                else:
+                    print(f"  [G1] No squad update data")
+        except asyncio.TimeoutError:
+            print(f"  [G1] No squad updates received (timeout — join may have failed)")
         return True
 
     async def exploit_cycle(self) -> bool:
@@ -1131,7 +1156,19 @@ class ClanGloryBot:
 
         # Wait for match to complete
         print(f"  >> Waiting {MATCH_WAIT}s for match completion...")
-        await asyncio.sleep(MATCH_WAIT)
+        # Check for server responses
+        for conn in self.connections:
+            try:
+                resp = await asyncio.wait_for(conn.online_reader.read(9999), timeout=3.0)
+                if resp:
+                    print(f"  [G{conn.index+1}] Post-match data: {len(resp.hex())} hex, header={resp.hex()[:12]}")
+                else:
+                    print(f"  [G{conn.index+1}] Post-match: connection closed")
+            except asyncio.TimeoutError:
+                print(f"  [G{conn.index+1}] Post-match: no data (timeout)")
+            except Exception as e:
+                print(f"  [G{conn.index+1}] Post-match: {e}")
+        await asyncio.sleep(MATCH_WAIT - 3)
 
         # ALL members leave team
         print(f"  >> Leaving team...")
