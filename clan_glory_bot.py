@@ -826,7 +826,7 @@ class GuestConnection:
                             json_str = await DeCode_PackEt(payload)
                             if json_str:
                                 parsed = json.loads(json_str)
-                                print(f"  [G{self.index+1}] Join response decoded: {str(parsed)[:200]}")
+                                print(f"  [G{self.index+1}] Join response decoded: {str(parsed)[:500]}")
                                 break
                         except:
                             continue
@@ -1122,7 +1122,7 @@ class ClanGloryBot:
                             json_str = await DeCode_PackEt(payload)
                             if json_str:
                                 parsed = json.loads(json_str)
-                                print(f"  [G1] Decoded: {str(parsed)[:300]}")
+                                print(f"  [G1] Decoded: {str(parsed)[:3000]}")
                                 break
                         except:
                             continue
