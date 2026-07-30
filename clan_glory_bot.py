@@ -72,7 +72,7 @@ DEFAULT_REGION     = "ME"
 DEFAULT_CYCLES     = 200
 SPAM_DURATION      = 18
 SPAM_DELAY         = 0.2
-MATCH_WAIT         = 20
+MATCH_WAIT         = 60
 LEAVE_DELAY        = 2.0
 CYCLE_DELAY        = 3.0
 RECONNECT_DELAY    = 3
@@ -791,6 +791,52 @@ class GuestConnection:
         self.in_match = True
         return sent
 
+    async def join_match(self, group_id) -> bool:
+        """Join a match room using GroupID from the match-found packet.
+        Based on RoomJoin_fields from main.py: field 1=3, packet type 0e15.
+        """
+        if not group_id:
+            print(f"  [G{self.index+1}] No group_id for match join")
+            return False
+        try:
+            group_id = int(group_id)
+        except (ValueError, TypeError):
+            print(f"  [G{self.index+1}] Invalid group_id: {group_id}")
+            return False
+
+        try:
+            fields = {
+                1: 3,
+                2: {
+                    1: group_id,
+                    2: "",
+                    8: {"1": "IDC3", "2": 149, "3": "IND"},
+                    10: 1,
+                    13: 1,
+                    14: 1,
+                    16: "en",
+                    22: {"1": 21},
+                }
+            }
+            proto_bytes = await CrEaTe_ProTo(fields)
+            proto_hex = proto_bytes.hex()
+            # Packet type 0e15 = room join (online channel)
+            packet = await GeneRaTePk(proto_hex, "0e15", self.key, self.iv)
+            await self.send_packet(packet, channel="online")
+            print(f"  [G{self.index+1}] Match join sent (GroupID={group_id}, type=0e15)")
+            await asyncio.sleep(0.5)
+            # Also try chat channel (match packets came on chat)
+            try:
+                packet_chat = await GeneRaTePk(proto_hex, "1215", self.key, self.iv)
+                await self.send_packet(packet_chat, channel="chat")
+                print(f"  [G{self.index+1}] Match join also sent on chat (type=1215)")
+            except:
+                pass
+            return True
+        except Exception as e:
+            print(f"  [G{self.index+1}] Match join error: {e}")
+            return False
+
     async def leave_team(self):
         """Leave squad safely.
         FIX: Uses self.account_uid instead of hardcoded 12480598706.
@@ -1328,6 +1374,17 @@ class ClanGloryBot:
                             print(f"  *** MATCH PACKET FOUND (f2=18) for G{conn.index+1}! ***")
                             conn.match_found = True
                             conn.match_data = parsed
+                            # Extract GroupID and join the match immediately
+                            f5 = parsed.get('5', {})
+                            f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
+                            group_id = None
+                            if isinstance(f5d, dict):
+                                f1 = f5d.get('1', {})
+                                if isinstance(f1, dict) and 'data' in f1:
+                                    group_id = f1['data']
+                            if group_id:
+                                print(f"  [G{conn.index+1}] Joining match room (GroupID={group_id})...")
+                                await conn.join_match(group_id)
                         break
                     except:
                         continue
@@ -1427,6 +1484,17 @@ class ClanGloryBot:
                                         print(f"  *** MATCH PACKET FOUND via pattern search! ***")
                                         conn.match_found = True
                                         conn.match_data = parsed
+                                        # Extract GroupID and join
+                                        f5 = parsed.get('5', {})
+                                        f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
+                                        group_id = None
+                                        if isinstance(f5d, dict):
+                                            f1 = f5d.get('1', {})
+                                            if isinstance(f1, dict) and 'data' in f1:
+                                                group_id = f1['data']
+                                        if group_id:
+                                            print(f"  [G{conn.index+1}] Joining match room (GroupID={group_id})...")
+                                            await conn.join_match(group_id)
                                         found_match_packet = True
                                         break
                             except:
@@ -1438,6 +1506,24 @@ class ClanGloryBot:
                 if not found_match_packet:
                     print(f"  [G{conn.index+1}] {channel_name}: no f2=18 match packet found in {len(resp_hex)} hex")
 
+
+        # Share GroupID: if any connection found a match, make ALL connections join
+        match_finders = [c for c in self.connections if c.match_found and c.match_data]
+        if match_finders:
+            for finder in match_finders:
+                f5 = finder.match_data.get('5', {})
+                f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
+                shared_group_id = None
+                if isinstance(f5d, dict):
+                    f1 = f5d.get('1', {})
+                    if isinstance(f1, dict) and 'data' in f1:
+                        shared_group_id = f1['data']
+                if shared_group_id:
+                    for other in self.connections:
+                        if other.index != finder.index and not other.match_found and other.connected:
+                            print(f"  [G{other.index+1}] Joining match (shared by G{finder.index+1}, GroupID={shared_group_id})...")
+                            await other.join_match(shared_group_id)
+                            other.match_found = True
 
         await asyncio.sleep(max(0, MATCH_WAIT - 5))
 
