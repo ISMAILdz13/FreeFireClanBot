@@ -774,11 +774,30 @@ class GuestConnection:
         await asyncio.sleep(PACKET_INTERVAL)
 
     async def join_squad(self, squad_code: str):
-        """GenJoinSquadsPacket — join existing squad using the squad_code."""
+        """Join squad — tries level bot simple format first, then TCP bot format."""
+        # Extract numeric part from squad_code (e.g. "1785406884129332808_wny7qxnck8" -> 1785406884129332808)
+        numeric_part = squad_code.split('_')[0] if '_' in squad_code else squad_code
+
+        # Method 1: Level bot simple format — {1: 4, 2: {1: 1, 2: int(code)}}
+        try:
+            from byte import CrEaTe_ProTo, GeneRaTePk
+            fields = {1: 4, 2: {1: 1, 2: int(numeric_part)}}
+            proto_hex = (await CrEaTe_ProTo(fields)).hex()
+            simple_packet = await GeneRaTePk(proto_hex, '0515', self.key, self.iv)
+            await self.send_packet(simple_packet)
+            await asyncio.sleep(PACKET_INTERVAL)
+            self.in_squad = True
+            print(f"  [G{self.index+1}] Joined via simple format (0515, field 2.2={numeric_part[:15]}...)")
+            return
+        except Exception as e:
+            print(f"  [G{self.index+1}] Simple join failed ({e}), trying TCP bot format...")
+
+        # Method 2: TCP bot GenJoinSquadsPacket — {1: 4, 2: {5: str(code), 6: 6, ...}}
         packet = await GenJoinSquadsPacket(squad_code, self.key, self.iv)
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
         self.in_squad = True
+        print(f"  [G{self.index+1}] Joined via GenJoinSquadsPacket (0515, field 2.5)")
 
     async def spam_start_match(self, duration: float, delay: float):
         """Spam start-match packets on the ONLINE socket for the given duration.
