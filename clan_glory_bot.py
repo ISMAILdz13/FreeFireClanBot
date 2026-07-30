@@ -1515,6 +1515,9 @@ class ClanGloryBot:
                 print(f"  Cycle error: {e}")
                 await asyncio.sleep(RECONNECT_DELAY)
 
+        # Clean up and show AFTER glory check
+        await self.cleanup_connections()
+
 
     async def cleanup_connections(self):
         """Clean up all guest connections."""
