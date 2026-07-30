@@ -809,7 +809,31 @@ class GuestConnection:
             await self.send_packet(simple_packet, channel="online")
             await asyncio.sleep(PACKET_INTERVAL)
             self.in_squad = True
-            print(f"  [G{self.index+1}] Join packet sent (0515, code={numeric_part}, both channels)")
+            print(f"  [G{self.index+1}] Join packet sent (0515, code={numeric_part}, online channel)")
+            # Read server response to check if join was accepted
+            await asyncio.sleep(1.0)
+            try:
+                resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=2.0)
+                if resp:
+                    resp_hex = resp.hex()
+                    print(f"  [G{self.index+1}] Join response: {len(resp_hex)} hex chars, header={resp_hex[:12]}")
+                    # Try to decode
+                    for skip in [10, 12, 8, 14, 6]:
+                        try:
+                            payload = resp_hex[skip:]
+                            if len(payload) < 10:
+                                continue
+                            json_str = await DeCode_PackEt(payload)
+                            if json_str:
+                                parsed = json.loads(json_str)
+                                print(f"  [G{self.index+1}] Join response decoded: {str(parsed)[:200]}")
+                                break
+                        except:
+                            continue
+                else:
+                    print(f"  [G{self.index+1}] No join response (server silent)")
+            except asyncio.TimeoutError:
+                print(f"  [G{self.index+1}] No join response (timeout)")
             return
         except Exception as e:
             print(f"  [G{self.index+1}] Simple join failed ({e}), trying TCP bot format...")
