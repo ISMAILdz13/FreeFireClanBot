@@ -324,6 +324,73 @@ class GuestConnection:
         """Set the region for packet type mapping."""
         self.region = region
 
+    async def read_invite_code(self, timeout: float = 5.0) -> Optional[str]:
+        """
+        Read invite packet from Online socket — extract squad join code.
+        TCP bot uses: field5_data.get('8', {}).get('data') as the invite code.
+        """
+        try:
+            data = await asyncio.wait_for(self.online_reader.read(9999), timeout=timeout)
+            if not data:
+                return None
+            data_hex = data.hex()
+            print(f"  [G{self.index+1}] Invite response: {data_hex[:80]}...")
+
+            for header_skip in [10, 8, 12, 6, 14]:
+                payload_hex = data_hex[header_skip:]
+                if not payload_hex:
+                    continue
+
+                # Try raw parse
+                try:
+                    json_str = await DeCode_PackEt(payload_hex)
+                    if json_str:
+                        packet_json = json.loads(json_str)
+                        field5 = packet_json.get('5', {})
+                        if isinstance(field5, dict) and 'data' in field5:
+                            field5_data = field5['data']
+                            if isinstance(field5_data, dict):
+                                # Field 8 = invite code (TCP bot's approach)
+                                code = field5_data.get('8', {})
+                                if isinstance(code, dict) and 'data' in code:
+                                    print(f"  [G{self.index+1}] Invite code from field 5.8: {code['data']}")
+                                    return str(code['data'])
+                                # Also try field 31 (GeTSQDaTa's squad code)
+                                code31 = field5_data.get('31', {})
+                                if isinstance(code31, dict) and 'data' in code31:
+                                    print(f"  [G{self.index+1}] Squad code from field 5.31: {code31['data']}")
+                                    return str(code31['data'])
+                except:
+                    pass
+
+                # Try decrypted parse
+                try:
+                    decrypted_hex = await DEc_PacKeT(payload_hex, self.key, self.iv)
+                    json_str = await DeCode_PackEt(decrypted_hex)
+                    if json_str:
+                        packet_json = json.loads(json_str)
+                        field5 = packet_json.get('5', {})
+                        if isinstance(field5, dict) and 'data' in field5:
+                            field5_data = field5['data']
+                            if isinstance(field5_data, dict):
+                                code = field5_data.get('8', {})
+                                if isinstance(code, dict) and 'data' in code:
+                                    print(f"  [G{self.index+1}] Invite code (decrypted) from field 5.8: {code['data']}")
+                                    return str(code['data'])
+                                code31 = field5_data.get('31', {})
+                                if isinstance(code31, dict) and 'data' in code31:
+                                    print(f"  [G{self.index+1}] Squad code (decrypted) from field 5.31: {code31['data']}")
+                                    return str(code31['data'])
+                except:
+                    pass
+
+            return None
+        except asyncio.TimeoutError:
+            return None
+        except Exception as e:
+            print(f"  [G{self.index+1}] Read invite error: {e}")
+            return None
+
     async def authenticate(self, session: aiohttp.ClientSession) -> bool:
         """Full OAuth -> MajorLogin -> GetLoginData chain.
         Returns TCP endpoints + clan data for this account."""
@@ -480,56 +547,77 @@ class GuestConnection:
 
     async def read_squad_code(self, timeout: float = 5.0) -> Optional[str]:
         """
-        Read TCP response from Online channel, decode it, extract squad_code.
-        Tries both raw parse and decrypted parse.
+        Read TCP response from Online channel, extract squad_code.
+        Based on TCP bot approach: check 0500 prefix, parse data_hex[10:].
+        Tries multiple header offsets and both raw/decrypted parsing.
         """
         try:
             data = await asyncio.wait_for(self.online_reader.read(9999), timeout=timeout)
             if not data:
                 return None
             data_hex = data.hex()
+            print(f"  [G{self.index+1}] Raw response: {data_hex[:80]}... ({len(data_hex)} hex chars)")
 
-            # Skip header (first 10 hex chars = 5 bytes: packet_type + length)
-            payload_hex = data_hex[10:]
+            # The TCP bot checks for "0500" prefix — but responses may have
+            # different prefixes. Try multiple header offsets.
+            for header_skip in [10, 8, 12, 6, 14]:
+                payload_hex = data_hex[header_skip:]
+                if not payload_hex:
+                    continue
 
-            # Try 1: parse without decryption (some packets may be unencrypted)
-            try:
-                json_str = await DeCode_PackEt(payload_hex)
-                if json_str:
-                    packet_json = json.loads(json_str)
-                    # Check if this has squad data (field 5 with nested data)
-                    if '5' in packet_json and 'data' in packet_json.get('5', {}):
-                        try:
-                            uid, chat_code, squad_code = await GeTSQDaTa(packet_json)
-                            return str(squad_code)
-                        except:
-                            pass
-                    # Also check for field 1 = 1 (OpEnSq response)
-                    if packet_json.get('1') == 1 and '2' in packet_json:
-                        # May contain squad info
-                        pass
-            except:
-                pass
+                # Try 1: parse without decryption (server responses may be unencrypted)
+                try:
+                    json_str = await DeCode_PackEt(payload_hex)
+                    if json_str:
+                        packet_json = json.loads(json_str)
+                        # Check if this has squad data (field 5 with nested data)
+                        # GeTSQDaTa expects: D['5']['data']['31']['data']
+                        field5 = packet_json.get('5', {})
+                        if isinstance(field5, dict) and 'data' in field5:
+                            try:
+                                uid, chat_code, squad_code = await GeTSQDaTa(packet_json)
+                                print(f"  [G{self.index+1}] Squad code from field 5.31: {squad_code}")
+                                return str(squad_code)
+                            except Exception as ex:
+                                # Try extracting field 8 (invite code) as fallback
+                                field5_data = field5.get('data', {})
+                                if isinstance(field5_data, dict):
+                                    code = field5_data.get('8', {})
+                                    if isinstance(code, dict) and 'data' in code:
+                                        print(f"  [G{self.index+1}] Squad code from field 5.8: {code['data']}")
+                                        return str(code['data'])
+                except:
+                    pass
 
-            # Try 2: decrypt first, then parse
-            try:
-                decrypted_hex = await DEc_PacKeT(payload_hex, self.key, self.iv)
-                json_str = await DeCode_PackEt(decrypted_hex)
-                if json_str:
-                    packet_json = json.loads(json_str)
-                    if '5' in packet_json and 'data' in packet_json.get('5', {}):
-                        try:
-                            uid, chat_code, squad_code = await GeTSQDaTa(packet_json)
-                            return str(squad_code)
-                        except:
-                            pass
-            except:
-                pass
+                # Try 2: decrypt first, then parse
+                try:
+                    decrypted_hex = await DEc_PacKeT(payload_hex, self.key, self.iv)
+                    json_str = await DeCode_PackEt(decrypted_hex)
+                    if json_str:
+                        packet_json = json.loads(json_str)
+                        field5 = packet_json.get('5', {})
+                        if isinstance(field5, dict) and 'data' in field5:
+                            try:
+                                uid, chat_code, squad_code = await GeTSQDaTa(packet_json)
+                                print(f"  [G{self.index+1}] Squad code (decrypted) from field 5.31: {squad_code}")
+                                return str(squad_code)
+                            except:
+                                field5_data = field5.get('data', {})
+                                if isinstance(field5_data, dict):
+                                    code = field5_data.get('8', {})
+                                    if isinstance(code, dict) and 'data' in code:
+                                        print(f"  [G{self.index+1}] Squad code (decrypted) from field 5.8: {code['data']}")
+                                        return str(code['data'])
+                except:
+                    pass
 
+            print(f"  [G{self.index+1}] Could not parse squad code from response")
             return None
         except asyncio.TimeoutError:
+            print(f"  [G{self.index+1}] No response within {timeout}s")
             return None
         except Exception as e:
+            print(f"  [G{self.index+1}] Read squad code error: {e}")
             return None
 
     async def send_invite(self, target_uid: int, region: str):
@@ -547,17 +635,18 @@ class GuestConnection:
 
     async def spam_start_match(self, duration: float, delay: float):
         """Spam start-match packets on the ONLINE socket for the given duration.
-        This matches the level bot's approach — field 1=9 triggers matchmaking.
-        Uses a fixed UID in field 2.1 (like the level bot's PacketBuilder.start_match)."""
+        Uses TCP bot's field 1=214 (Clash Squad start match) — NOT field 1=9 (BR match).
+        """
         import time as _time
+        # TCP bot's create_simple_start_packet: field 1=214 (0xD6)
         fields = {
-            1: 9,
+            1: 214,
             2: {
-                1: 12480598706,  # Fixed UID (matches level bot's PacketBuilder)
+                1: 1,  # Start match command
             }
         }
         proto_bytes = await CrEaTe_ProTo(fields)
-        pkt_type = get_packet_type(self.region if hasattr(self, 'region') else "ME")
+        pkt_type = get_packet_type(self.region)
         packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
 
         end_time = _time.time() + duration
@@ -678,8 +767,8 @@ class ClanGloryBot:
                 if not await conn.connect_tcp():
                     continue
 
-                # Start listener
-                asyncio.create_task(conn.listen_online())
+                # NOTE: Do NOT start background listener — it would consume
+                # the OpEnSq response before read_squad_code can read it.
 
                 # Join clan (sends AuthClan to chat channel)
                 await conn.join_clan(self.clan_id)
@@ -713,8 +802,8 @@ class ClanGloryBot:
         await asyncio.sleep(2)
 
         if not squad_code:
-            print(f"  ⚠ No squad_code received — squad may not form properly")
-            squad_code = str(leader.account_uid)  # fallback
+            print(f"  ⚠ Leader got no squad_code — trying invite-based approach")
+            squad_code = None
 
         # Leader invites each member
         for member in members:
@@ -724,11 +813,20 @@ class ClanGloryBot:
         # Wait for invites to process
         await asyncio.sleep(2)
 
-        # Members join using the REAL squad_code
+        # Members join using the squad_code
         for member in members:
             try:
-                await member.join_squad(squad_code)
-                print(f"  [G{member.index+1}] Joined squad with code: {squad_code[:20]}...")
+                code = squad_code
+                if not code:
+                    # Fallback: read the invite packet from the member's socket
+                    print(f"  [G{member.index+1}] Reading invite packet...")
+                    code = await member.read_invite_code(timeout=5.0)
+                if code:
+                    await member.join_squad(code)
+                    member.in_squad = True
+                    print(f"  [G{member.index+1}] Joined squad with code: {str(code)[:20]}...")
+                else:
+                    print(f"  [G{member.index+1}] No invite code — squad join may fail")
             except Exception as e:
                 print(f"  [G{member.index+1}] Join squad failed: {e}")
             await asyncio.sleep(1)
@@ -789,7 +887,7 @@ class ClanGloryBot:
         self.cycle_count = 0
 
         print("=" * 60)
-        print("  CLAN GLORY BOT — Clash Squad Exit Exploit")
+        print("  CLAN GLORY BOT — Squad Match Farm")
         print(f"  Clan: {self.clan_id}")
         print(f"  Region: {self.region}")
         print(f"  Max cycles: {self.max_cycles}")
