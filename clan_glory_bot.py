@@ -6,17 +6,19 @@ match starts. System awards glory points for participation even on exit/loss.
 Repeat hundreds of times for fast glory farming.
 
 Flow per cycle (~30-60 seconds):
-  1. Squad leader queues Clash Squad
-  2. Wait for match to start (matchmaking delay)
-  3. ALL members immediately exit/withdraw
-  4. Glory points credited for participation
-  5. Re-queue immediately
+  1. Squad leader opens squad -> server returns squad_code
+  2. Members join using squad_code (NOT leader UID)
+  3. Squad leader queues Clash Squad match
+  4. Wait for match to start (matchmaking delay)
+  5. ALL members immediately exit/withdraw
+  6. Glory points credited for participation
+  7. Re-queue immediately
 
 Usage:
   python3 clan_glory_bot.py --clan-id 3100938923 --region ME --cycles 200
 
 Requirements:
-  - 4 guest accounts in data/guests.json
+  - 2+ guest accounts in data/guests.json
   - All guests must be members of the target clan
   - Termux: pip install pycryptodome aiohttp
 """
@@ -48,6 +50,7 @@ from xC4 import (
     CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
     AuthClan, OpEnSq, SEnd_InV, GenJoinSquadsPacket, ExiT,
     AutH_GlobAl, EnC_Uid, EnC_Vr,
+    DeCode_PackEt, DEc_PacKeT, GeTSQDaTa
 )
 
 # ======================== CONFIG ========================
@@ -68,387 +71,279 @@ PACKET_INTERVAL    = 0.5  # seconds between TCP packets
 REGION_PACKETS = {"ind": "0514", "bd": "0519"}
 DEFAULT_PACKET = "0515"
 
+GUESTS_FILE = os.path.join(BASE_DIR, "data", "guests.json")
+
+# ======================== HTTP API ========================
+
 HTTP_HEADERS = {
-    'User-Agent':      "Dalvik/2.1.0 (Linux; U; Android 11; ASUS_Z01QD Build/PI)",
-    'Connection':      "Keep-Alive",
-    'Accept-Encoding': "gzip",
-    'Content-Type':    "application/octet-stream",
-    'Expect':          "100-continue",
-    'X-Unity-Version': "2018.4.11f1",
-    'X-GA':            "v1 1",
-    'ReleaseVersion':  "OB54",
+    'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 11; ASUS_Z01QD Build/PI)",
+    'Connection': "Keep-Alive", 'Accept-Encoding': "gzip",
+    'Content-Type': "application/octet-stream", 'Expect': "100-continue",
+    'X-Unity-Version': "2018.4.11f1", 'X-GA': "v1 1", 'ReleaseVersion': "OB54",
 }
 
-GUESTS_FILE = os.path.join(BASE_DIR, "data", "guests.json")
-GARENA_CLIENT_ID = "100067"
-GARENA_CLIENT_SECRET = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
+OAUTH_CLIENT_SECRET = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
 OAUTH_V2_URL = "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant"
 OAUTH_V1_URL = "https://100067.connect.garena.com/oauth/guest/token/grant"
-UA_OAUTH = "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)"
+PORTS_URL = "https://loginbp.ggpolarbear.com/api/ports"
+MAJOR_LOGIN_URL = "https://loginbp.ggpolarbear.com/MajorLogin"
+CLAN_JOIN_URL = "https://clientbp.ggpolarbear.com/RequestClan"
 
 
-async def refresh_guest_token(session, uid: str, password: str) -> tuple:
-    """Refresh OAuth access_token + open_id (tries v2 then v1)."""
-    # v2 JSON
+def get_packet_type(region: str) -> str:
+    r = region.lower()
+    if r in REGION_PACKETS:
+        return REGION_PACKETS[r]
+    return DEFAULT_PACKET
+
+
+async def refresh_oauth_token(guest: dict) -> tuple:
+    """Refresh OAuth access_token + open_id via v2, fallback to v1."""
+    uid = guest["uid"]
+    password = guest["password"]
     try:
-        resp = await session.post(OAUTH_V2_URL, json={
-            "client_id": int(GARENA_CLIENT_ID),
-            "client_secret": GARENA_CLIENT_SECRET,
-            "client_type": 2,
-            "password": password,
-            "response_type": "token",
-            "uid": int(uid),
-        }, headers={
-            "User-Agent": UA_OAUTH,
-            "Accept": "application/json",
-            "Content-Type": "application/json; charset=utf-8",
-            "Connection": "Keep-Alive",
-            "Accept-Encoding": "gzip",
-        }, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json().get("data", resp.json())
-            at = data.get("access_token")
-            oid = data.get("open_id")
-            if at and oid:
-                return at, oid
-    except Exception:
-        pass
-    # v1 form-urlencoded
-    try:
-        resp = await session.post(OAUTH_V1_URL, data={
-            "uid": uid, "password": password,
-            "response_type": "token", "client_type": "2",
-            "client_secret": GARENA_CLIENT_SECRET,
-            "client_id": GARENA_CLIENT_ID,
-        }, headers={
-            "User-Agent": UA_OAUTH,
-            "Content-Type": "application/x-www-form-urlencoded",
-        }, timeout=15)
-        if resp.status_code == 200:
-            d = resp.json()
-            if d.get("access_token") and d.get("open_id"):
-                return d["access_token"], d["open_id"]
-    except Exception:
-        pass
+        async with aiohttp.ClientSession() as session:
+            # Try v2
+            async with session.post(OAUTH_V2_URL, json={
+                "client_id": 100067, "client_secret": OAUTH_CLIENT_SECRET,
+                "client_type": 2, "password": password,
+                "response_type": "token", "uid": int(uid)
+            }, headers={"Content-Type": "application/json; charset=utf-8",
+                        "User-Agent": "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)"},
+                       ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    odata = data.get("data", data)
+                    at = odata.get("access_token")
+                    oid = odata.get("open_id")
+                    if at and oid:
+                        return at, oid
+            # Fallback to v1
+            async with session.post(OAUTH_V1_URL, data={
+                "uid": uid, "password": password, "response_type": "token",
+                "client_type": "2", "client_secret": OAUTH_CLIENT_SECRET,
+                "client_id": "100067"
+            }, headers={"Content-Type": "application/x-www-form-urlencoded",
+                        "User-Agent": "GarenaMSDK/4.0.19P8(ASUS_Z01QD ;Android 12;en;US;)"},
+                       ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    at = data.get("access_token")
+                    oid = data.get("open_id")
+                    if at and oid:
+                        return at, oid
+    except Exception as e:
+        print(f"  OAuth error: {e}")
     return None, None
 
-# ======================== CLAN JOIN API ========================
-
-def encode_varint(value: int) -> str:
-    """Encode an integer as protobuf varint hex string."""
-    result = []
-    while value > 0:
-        b = value & 0x7F
-        value >>= 7
-        if value > 0:
-            b |= 0x80
-        result.append(b)
-    return bytes(result).hex()
-
-
-def encrypt_api_payload(plain_hex: str) -> bytes:
-    """AES-CBC encrypt a hex payload for Free Fire HTTP API."""
-    cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
-    return cipher.encrypt(pad(bytes.fromhex(plain_hex), AES.block_size))
-
-
-API_HEADERS = {
-    "Content-Type": "application/x-www-form-urlencoded",
-    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; ASUS_Z01QD Build/PI)",
-    "X-Unity-Version": "2018.4.11f1",
-    "X-GA": "v1 1",
-    "ReleaseVersion": "OB54",
-    "Connection": "Keep-Alive",
-    "Accept-Encoding": "gzip",
-}
-
-
-async def api_join_clan(session, jwt: str, clan_id: int, server_url: str) -> bool:
-    """Send RequestJoinClan via HTTP API."""
-    clan_id_varint = encode_varint(clan_id)
-    body = encrypt_api_payload(f"08{clan_id_varint}")
-    headers = {**API_HEADERS, "Authorization": f"Bearer {jwt}"}
-
-    urls = [
-        f"{server_url}/RequestJoinClan",
-        "https://clientbp.ggpolarbear.com/RequestJoinClan",
-        "https://clientbp.ggblueshark.com/RequestJoinClan",
-    ]
-    for url in urls:
-        try:
-            async with session.post(url, data=body, headers=headers, ssl=False,
-                                     timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    return True
-                text = await resp.text()
-                if "ALREADY" in text and "THIS" in text.upper():
-                    return True  # Already in this clan
-        except Exception:
-            continue
-    return False
-
-
-async def auto_join_clan(session, jwt: str, clan_id: int, server_url: str, guest_idx: int) -> bool:
-    """Auto-join target clan via HTTP API. Does NOT quit — 120m cooldown."""
-    joined = await api_join_clan(session, jwt, clan_id, server_url)
-    if joined:
-        print(f"  [G{guest_idx+1}] Clan join OK \u2713")
-        return True
-    print(f"  [G{guest_idx+1}] Already in another clan (120m cooldown — continuing anyway)")
-    return True  # Continue anyway — farming still works
-
-
-# ======================== AUTH ========================
 
 async def build_major_login(open_id: str, access_token: str) -> bytes:
-    """Build encrypted MajorLogin protobuf payload."""
-    ml = MajoRLoGinrEq_pb2.MajorLogin()
+    """Build encrypted MajorLogin request."""
+    from MajoRLoGinrEq_pb2 import MajorLogin
+    ml = MajorLogin()
     ml.event_time = str(datetime.now())[:-7]
     ml.game_name = "free fire"
     ml.platform_id = 2
     ml.client_version = "1.126.2"
     ml.client_version_code = "2024010012"
-    ml.system_software = "Android OS 11 / API-30 (RQ3A.210805.001)"
+    ml.system_software = "Android OS 11 / API-30"
     ml.system_hardware = "Handheld"
     ml.device_type = "Handheld"
-    ml.telecom_operator = "Verizon"
-    ml.network_operator_a = "Verizon"
-    ml.network_type = "WIFI"
-    ml.network_type_a = "WIFI"
-    ml.screen_width = 1080
-    ml.screen_height = 2400
-    ml.screen_dpi = "440"
-    ml.processor_details = "ARMv8"
-    ml.cpu_type = 2
-    ml.cpu_architecture = "64"
-    ml.memory = 6144
-    ml.gpu_renderer = "Adreno (TM) 650"
-    ml.gpu_version = "OpenGL ES 3.2 V@1.50"
-    ml.graphics_api = "OpenGLES3"
-    ml.unique_device_id = f"Google|{random.randint(10**30, 10**31):x}"
-    ml.client_ip = ""
-    ml.language = "en"
     ml.open_id = open_id
     ml.open_id_type = "4"
-    ml.login_open_id_type = 4
     ml.access_token = access_token
-    ml.login_by = 3
     ml.platform_sdk_id = 2
+    ml.login_by = 3
+    ml.login_open_id_type = 4
     ml.origin_platform_type = "4"
     ml.primary_platform_type = "4"
-    ml.memory_available.version = 55
-    ml.memory_available.hidden_value = 81
-    ml.external_storage_total = 128512
-    ml.external_storage_available = random.randint(38000, 52000)
-    ml.internal_storage_total = 110731
-    ml.internal_storage_available = random.randint(18000, 32000)
-    ml.game_disk_storage_total = 26628
-    ml.game_disk_storage_available = random.randint(18000, 25000)
-    ml.external_sdcard_total_storage = 119234
-    ml.external_sdcard_avail_storage = random.randint(25000, 60000)
-    ml.library_path = "/data/app/~~random/base.apk"
-    ml.library_token = "hash|base.apk"
-    ml.client_using_version = "7428b253defc164018c604a1ebbfebdf"
-    ml.supported_astc_bitset = 16383
-    ml.analytics_detail = b"FwQVTgUPX1UaUllDDwcWCRBpWAUOUgsvA1snWlBaO1kFYg=="
-    ml.loading_time = random.randint(9000, 18000)
-    ml.release_channel = "android"
-    ml.channel_type = 3
-    ml.reg_avatar = 1
-    ml.if_push = 1
-    ml.is_vpn = 0
-    ml.android_engine_init_flag = 110009
-
-    raw = ml.SerializeToString()
-    cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
-    return cipher.encrypt(pad(raw, AES.block_size))
+    enc = AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(pad(ml.SerializeToString(), 16))
+    return enc
 
 
-async def do_major_login(session, open_id: str, access_token: str) -> Optional[dict]:
-    """MajorLogin -> JWT + server info."""
-    payload = await build_major_login(open_id, access_token)
-    headers = {**HTTP_HEADERS, "Authorization": f"Bearer {access_token}"}
-
-    for url in ["https://loginbp.ggwhitehawk.com/MajorLogin",
-                "https://loginbp.ggpolarbear.com/MajorLogin",
-                "https://loginbp.ggblueshark.com/MajorLogin",
-                "https://loginbp.ggblueshark.com/MajorLogin"]:
-        try:
-            async with session.post(url, data=payload, headers=headers, ssl=False,
-                                     timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    res = MajoRLoGinrEs_pb2.MajorLoginRes()
+async def get_login_data(jwt: str, server_url: str, access_token: str) -> dict:
+    """Get login data (whisper_ip:port + online_ip:port) via HTTP."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(server_url, data=jwt, headers={
+                **HTTP_HEADERS, "Authorization": f"Bearer {access_token}"
+            }, ssl=False, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status == 200:
+                    data = await r.read()
+                    from MajoRLoGinrEs_pb2 import MajorLoginRes
+                    res = MajorLoginRes()
                     res.ParseFromString(data)
                     return {
-                        "jwt": res.token,
-                        "url": res.url,
-                        "key": res.key if res.key else AES_KEY,
-                        "iv": res.iv if res.iv else AES_IV,
-                        "timestamp": res.timestamp,
-                        "account_uid": res.account_uid,
-                        "region": res.region,
+                        "whisper_ip": res.whisper_server_ip,
+                        "whisper_port": res.whisper_server_port,
+                        "online_ip": res.online_server_ip,
+                        "online_port": res.online_server_port,
+                        "server_url": server_url,
                     }
-        except Exception as e:
-            print(f"  MajorLogin err: {e}")
-    return None
-
-
-async def get_login_data(session, base_url: str, login_payload: bytes, jwt: str) -> Optional[dict]:
-    """GetLoginData -> TCP server IPs."""
-    url = f"{base_url}/GetLoginData"
-    headers = {**HTTP_HEADERS, "Authorization": f"Bearer {jwt}"}
-    try:
-        async with session.post(url, data=login_payload, headers=headers, ssl=False,
-                                timeout=aiohttp.ClientTimeout(total=20)) as resp:
-            if resp.status == 200:
-                data = await resp.read()
-                proto = PorTs_pb2.GetLoginData()
-                proto.ParseFromString(data)
-                online_ip, online_port = proto.Online_IP_Port.split(":")
-                chat_ip, chat_port = proto.AccountIP_Port.split(":")
-                return {
-                    "online_ip": online_ip,
-                    "online_port": int(online_port),
-                    "chat_ip": chat_ip,
-                    "chat_port": int(chat_port),
-                    "account_uid": proto.AccountUID,
-                    "account_name": proto.AccountName,
-                    "clan_id": proto.Clan_ID,
-                    "clan_compiled_data": proto.Clan_Compiled_Data,
-                    "region": proto.Region,
-                }
     except Exception as e:
-        print(f"  GetLoginData err: {e}")
-    return None
+        print(f"  Login data error: {e}")
+    return {}
 
 
-def build_tcp_auth_token(account_uid: int, jwt: str, timestamp: int, key: bytes, iv: bytes) -> str:
-    """Build TCP auth startup token (matches xAuThSTarTuP exactly)."""
-    uid_hex = hex(account_uid)[2:]
-    uid_length = len(uid_hex)
-
-    # Timestamp: plain hex conversion (NOT varint) — matches DecodE_HeX()
-    ts_hex = hex(timestamp)[2:]
-    if len(ts_hex) == 1:
-        ts_hex = "0" + ts_hex
-
-    token_hex = jwt.encode().hex()
-    encrypted_packet = EnC_PacKeT_sync(token_hex, key, iv)
-    encrypted_packet_length = hex(len(encrypted_packet) // 2)[2:]
-
-    if uid_length == 9:    headers = '0000000'
-    elif uid_length == 8: headers = '00000000'
-    elif uid_length == 10: headers = '000000'
-    elif uid_length == 7:  headers = '000000000'
-    else:                  headers = '0000000'
-
-    return f"0115{headers}{uid_hex}{ts_hex}00000{encrypted_packet_length}{encrypted_packet}"
+async def auto_join_clan(session: aiohttp.ClientSession, jwt: str, clan_id: int,
+                         server_url: str, index: int):
+    """Send HTTP RequestClan to join the target clan."""
+    try:
+        # Build a simple protobuf: field 1 = clan_id
+        fields = {1: int(clan_id)}
+        proto = await CrEaTe_ProTo(fields)
+        enc_hex = EnC_PacKeT_sync(proto.hex(), AES_KEY, AES_IV)
+        async with session.post("https://clientbp.ggpolarbear.com/RequestClan",
+            data=bytes.fromhex(enc_hex),
+            headers={**HTTP_HEADERS, "Authorization": f"Bearer {jwt}"},
+            ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            status = r.status
+            if status == 200:
+                print(f"  [G{index+1}] Joined clan {clan_id} (HTTP)")
+            else:
+                print(f"  [G{index+1}] Clan join HTTP {status}")
+    except Exception as e:
+        print(f"  [G{index+1}] Clan join error: {e}")
 
 
-def get_packet_type(region: str) -> str:
-    """Get TCP packet type prefix for region."""
-    return REGION_PACKETS.get(region.lower(), DEFAULT_PACKET)
-
-
-# ======================== GUEST CONNECTION ========================
+# ======================== TCP CONNECTION ========================
 
 class GuestConnection:
-    """Manages TCP connections for a single guest account."""
+    """Manages TCP connections (Online + Chat) for a single guest account."""
 
     def __init__(self, guest: dict, index: int):
         self.guest = guest
         self.index = index
         self.uid = guest["uid"]
-        self.open_id = guest["open_id"]
-        self.access_token = guest["access_token"]
-
-        self.jwt: str = ""
-        self.server_url: str = ""
-        self.key: bytes = AES_KEY
-        self.iv: bytes = AES_IV
-        self.timestamp: int = 0
-        self.account_uid: int = 0
-        self.account_name: str = ""
-        self.clan_compiled_data: str = ""
-
-        self.online_ip: str = ""
-        self.online_port: int = 0
-        self.chat_ip: str = ""
-        self.chat_port: int = 0
-
+        self.password = guest.get("password", "")
+        self.access_token = guest.get("access_token", "")
+        self.open_id = guest.get("open_id", "")
+        self.jwt = ""
+        self.key = b""
+        self.iv = b""
+        self.account_uid = 0
+        self.server_url = ""
+        self.whisper_ip = ""
+        self.whisper_port = 0
+        self.online_ip = ""
+        self.online_port = 0
         self.online_writer = None
         self.online_reader = None
         self.chat_writer = None
         self.chat_reader = None
-
         self.connected = False
         self.in_squad = False
         self.in_match = False
         self.match_started = False
+        self.squad_code = None
+        self._listen_task = None
 
-    async def authenticate(self, session):
-        """Full auth: MajorLogin -> GetLoginData."""
+    async def authenticate(self, session: aiohttp.ClientSession) -> bool:
+        """Full OAuth -> MajorLogin -> GetLoginData chain."""
         print(f"  [G{self.index+1}] UID {self.uid}: Auth...")
 
+        # Refresh OAuth token
+        at, oid = await refresh_oauth_token(self.guest)
+        if at:
+            self.access_token = at
+            self.open_id = oid
+            self.guest["access_token"] = at
+            self.guest["open_id"] = oid
+        else:
+            at = self.access_token
+            oid = self.open_id
 
-        login_payload = await build_major_login(self.open_id, self.access_token)
-        auth = await do_major_login(session, self.open_id, self.access_token)
-        if not auth:
-            print(f"  [G{self.index+1}] MajorLogin FAIL")
+        # MajorLogin
+        payload = await build_major_login(oid, at)
+        try:
+            async with session.post(MAJOR_LOGIN_URL, data=payload, headers={
+                **HTTP_HEADERS, "Authorization": f"Bearer {at}"
+            }, ssl=False, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    print(f"  [G{self.index+1}] MajorLogin FAIL (HTTP {r.status})")
+                    return False
+                data = await r.read()
+                from MajoRLoGinrEs_pb2 import MajorLoginRes
+                res = MajorLoginRes()
+                res.ParseFromString(data)
+                self.jwt = res.token
+                self.key = bytes(res.secret_key, 'utf-8')
+                self.iv = bytes(res.secret_iv, 'utf-8')
+                self.server_url = res.server
+                # Parse account UID from JWT (it's encoded in the token)
+                self.account_uid = res.uid if hasattr(res, 'uid') else 0
+                print(f"  [G{self.index+1}] JWT OK uid={self.account_uid}")
+        except Exception as e:
+            print(f"  [G{self.index+1}] MajorLogin FAIL: {e}")
             return False
 
-        self.jwt = auth["jwt"]
-        self.server_url = auth["url"].rstrip("/")
-        self.key = auth["key"]
-        self.iv = auth["iv"]
-        self.timestamp = auth["timestamp"]
-        self.account_uid = auth["account_uid"]
-
-        print(f"  [G{self.index+1}] JWT OK uid={self.account_uid}")
-
-        login_data = await get_login_data(session, self.server_url, login_payload, self.jwt)
+        # Get login data (ports + IPs)
+        login_data = await get_login_data(self.jwt, self.server_url, at)
         if not login_data:
-            print(f"  [G{self.index+1}] GetLoginData FAIL")
+            print(f"  [G{self.index+1}] No login data")
             return False
 
-        self.online_ip = login_data["online_ip"]
-        self.online_port = login_data["online_port"]
-        self.chat_ip = login_data["chat_ip"]
-        self.chat_port = login_data["chat_port"]
-        self.account_name = login_data.get("account_name", "")
-        self.clan_compiled_data = login_data.get("clan_compiled_data", "")
+        self.whisper_ip = login_data.get("whisper_ip", "")
+        self.whisper_port = login_data.get("whisper_port", 0)
+        self.online_ip = login_data.get("online_ip", "")
+        self.online_port = login_data.get("online_port", 0)
 
-        print(f"  [G{self.index+1}] TCP: {self.online_ip}:{self.online_port} | {self.chat_ip}:{self.chat_port}")
+        if not self.online_ip:
+            # Parse ports from PorTs_pb2
+            try:
+                async with session.post(PORTS_URL, data=self.jwt, headers={
+                    **HTTP_HEADERS, "Authorization": f"Bearer {at}"
+                }, ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    if r.status == 200:
+                        from PorTs_pb2 import Ports
+                        ports = Ports()
+                        ports.ParseFromString(await r.read())
+                        self.whisper_ip = ports.whisper_server_ip
+                        self.whisper_port = ports.whisper_server_port
+                        self.online_ip = ports.online_server_ip
+                        self.online_port = ports.online_server_port
+            except:
+                pass
+
+        if not self.online_ip:
+            print(f"  [G{self.index+1}] No TCP endpoints")
+            return False
+
+        print(f"  [G{self.index+1}] TCP: {self.online_ip}:{self.online_port} | {self.whisper_ip}:{self.whisper_port}")
         return True
 
-    async def connect_tcp(self):
-        """Connect to TCP Online + Chat servers."""
-        if self.connected:
-            return True
+    async def connect_tcp(self) -> bool:
+        """Connect to Online + Chat TCP servers."""
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
         try:
-            print(f"  [G{self.index+1}] TCP connect Online {self.online_ip}:{self.online_port}...")
+            # Online connection
             self.online_reader, self.online_writer = await asyncio.open_connection(
-                self.online_ip, self.online_port)
-
-            auth_token = build_tcp_auth_token(self.account_uid, self.jwt, self.timestamp,
-                                              self.key, self.iv)
-            self.online_writer.write(bytes.fromhex(auth_token))
-            await self.online_writer.drain()
-
-            print(f"  [G{self.index+1}] TCP connect Chat {self.chat_ip}:{self.chat_port}...")
+                self.online_ip, self.online_port, ssl=ssl_ctx)
+            # Chat (Whisper) connection
             self.chat_reader, self.chat_writer = await asyncio.open_connection(
-                self.chat_ip, self.chat_port)
-            self.chat_writer.write(bytes.fromhex(auth_token))
-            await self.chat_writer.drain()
+                self.whisper_ip, self.whisper_port, ssl=ssl_ctx)
 
-            print(f"  [G{self.index+1}] TCP OK")
+            # Send auth token on both
+            if self.jwt:
+                token_bytes = bytes.fromhex(self.jwt) if all(c in '0123456789abcdef' for c in self.jwt) else self.jwt.encode()
+                self.online_writer.write(token_bytes)
+                await self.online_writer.drain()
+                self.chat_writer.write(token_bytes)
+                await self.chat_writer.drain()
+
+            await asyncio.sleep(1)
+
+            # Send global auth
+            await self.send_global_auth()
+
             self.connected = True
-            # Give server time to process auth
-            await asyncio.sleep(0.5)
+            print(f"  [G{self.index+1}] TCP OK")
             return True
         except Exception as e:
-            print(f"  [G{self.index+1}] TCP FAIL: {e}")
+            print(f"  [G{self.index+1}] TCP connect FAIL: {e}")
             self.connected = False
             return False
 
@@ -468,18 +363,86 @@ class GuestConnection:
         await asyncio.sleep(PACKET_INTERVAL)
 
     async def join_clan(self, clan_id: int):
-        """AuthClan — join guild (sent to CHAT channel, uses clan_compiled_data)."""
-        auth_data = self.clan_compiled_data if self.clan_compiled_data else self.jwt
+        """AuthClan — join guild (sent to CHAT channel)."""
+        auth_data = self.clan_compiled_data if hasattr(self, 'clan_compiled_data') and self.clan_compiled_data else self.jwt
         packet = await AuthClan(clan_id, auth_data, self.key, self.iv)
         await self.send_packet(packet, channel="chat")
         await asyncio.sleep(PACKET_INTERVAL)
 
-    async def open_squad(self, region: str):
-        """OpEnSq — leader opens squad for matchmaking."""
+    async def open_squad(self, region: str) -> str:
+        """
+        OpEnSq — leader opens squad for matchmaking.
+        READS the server response to extract the squad_code.
+        Returns the squad_code or None on failure.
+        """
         packet = await OpEnSq(self.key, self.iv, region)
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
         self.in_squad = True
+
+        # Read the server response to get the squad_code
+        squad_code = await self.read_squad_code()
+        if squad_code:
+            self.squad_code = squad_code
+            print(f"  [G{self.index+1}] Squad opened, code: {squad_code[:20]}...")
+        else:
+            print(f"  [G{self.index+1}] Squad opened but no code in response — using UID fallback")
+            self.squad_code = str(self.account_uid)
+        return self.squad_code
+
+    async def read_squad_code(self, timeout: float = 5.0) -> Optional[str]:
+        """
+        Read TCP response from Online channel, decode it, extract squad_code.
+        Tries both raw parse and decrypted parse.
+        """
+        try:
+            data = await asyncio.wait_for(self.online_reader.read(9999), timeout=timeout)
+            if not data:
+                return None
+            data_hex = data.hex()
+
+            # Skip header (first 10 hex chars = 5 bytes: packet_type + length)
+            payload_hex = data_hex[10:]
+
+            # Try 1: parse without decryption (some packets may be unencrypted)
+            try:
+                json_str = await DeCode_PackEt(payload_hex)
+                if json_str:
+                    packet_json = json.loads(json_str)
+                    # Check if this has squad data (field 5 with nested data)
+                    if '5' in packet_json and 'data' in packet_json.get('5', {}):
+                        try:
+                            uid, chat_code, squad_code = await GeTSQDaTa(packet_json)
+                            return str(squad_code)
+                        except:
+                            pass
+                    # Also check for field 1 = 1 (OpEnSq response)
+                    if packet_json.get('1') == 1 and '2' in packet_json:
+                        # May contain squad info
+                        pass
+            except:
+                pass
+
+            # Try 2: decrypt first, then parse
+            try:
+                decrypted_hex = await DEc_PacKeT(payload_hex, self.key, self.iv)
+                json_str = await DeCode_PackEt(decrypted_hex)
+                if json_str:
+                    packet_json = json.loads(json_str)
+                    if '5' in packet_json and 'data' in packet_json.get('5', {}):
+                        try:
+                            uid, chat_code, squad_code = await GeTSQDaTa(packet_json)
+                            return str(squad_code)
+                        except:
+                            pass
+            except:
+                pass
+
+            return None
+        except asyncio.TimeoutError:
+            return None
+        except Exception as e:
+            return None
 
     async def send_invite(self, target_uid: int, region: str):
         """SEnd_InV — invite a player to squad."""
@@ -487,9 +450,9 @@ class GuestConnection:
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
 
-    async def join_squad(self, code: str):
-        """GenJoinSquadsPacket — join existing squad."""
-        packet = await GenJoinSquadsPacket(code, self.key, self.iv)
+    async def join_squad(self, squad_code: str):
+        """GenJoinSquadsPacket — join existing squad using the squad_code."""
+        packet = await GenJoinSquadsPacket(squad_code, self.key, self.iv)
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
         self.in_squad = True
@@ -498,7 +461,6 @@ class GuestConnection:
         """
         Queue for Clash Squad match.
         Uses FS packet (field 1=9) which starts matchmaking.
-        For Clash Squad, the squad mode must be set to CS via OpEnSq.
         """
         # Build match start packet — field 1 = 9 (start match)
         fields = {
@@ -522,30 +484,29 @@ class GuestConnection:
         self.in_match = False
 
     async def listen_online(self):
-        """Background reader for Online TCP — detect match start/end."""
+        """Background reader for Online TCP — detect match start/end + squad data."""
         while self.connected and self.online_reader:
             try:
-                data = await self.online_reader.read(9999)
+                data = await asyncio.wait_for(self.online_reader.read(9999), timeout=120)
                 if not data:
                     print(f"  [G{self.index+1}] Online closed by server")
                     self.connected = False
                     break
                 hex_data = data.hex()
-                # Match start detection: packets starting with 0515 with specific patterns
-                # Match end detection: 0500 packets
+                # Match start detection
                 if hex_data.startswith("0500"):
                     self.match_started = False
                 elif hex_data.startswith("0515") and not self.match_started:
-                    # Potential match start notification
                     self.match_started = True
+            except asyncio.TimeoutError:
+                pass
             except Exception as e:
                 print(f"  [G{self.index+1}] Listen err: {e}")
                 self.connected = False
                 break
 
-    async def disconnect(self):
+    async def cleanup(self):
         """Close all TCP connections."""
-        self.connected = False
         for writer in [self.online_writer, self.chat_writer]:
             if writer and not writer.is_closing():
                 try:
@@ -557,17 +518,17 @@ class GuestConnection:
         self.chat_writer = self.chat_reader = None
 
 
-# ======================== CLAN GLORY BOT (EXPLOIT) ========================
+# ======================== CLAN GLORY BOT ========================
 
 class ClanGloryBot:
     """
     Clash Squad Exit Glitch exploit bot.
 
     Each cycle (~30-60s):
-      1. Squad leader opens squad + invites members
-      2. All members join squad
+      1. Leader opens squad + gets squad_code from server
+      2. Members join using squad_code
       3. Leader queues Clash Squad
-      4. Wait for matchmaking (MATCHMAKING_WAIT seconds)
+      4. Wait for matchmaking
       5. ALL members immediately exit/withdraw
       6. Wait POST_EXIT_WAIT for glory to credit
       7. Re-queue
@@ -610,7 +571,7 @@ class ClanGloryBot:
 
                 # Auto-join target clan via HTTP API
                 await auto_join_clan(session, conn.jwt, self.clan_id, conn.server_url, i)
-                await asyncio.sleep(1)  # Wait for clan join to process
+                await asyncio.sleep(1)
 
                 if not await conn.connect_tcp():
                     continue
@@ -632,7 +593,11 @@ class ClanGloryBot:
         return True
 
     async def form_squad(self) -> bool:
-        """Leader opens squad, invites members, members join."""
+        """
+        Leader opens squad -> gets squad_code from server response.
+        Leader invites members.
+        Members join using the REAL squad_code (not leader UID!).
+        """
         if not self.connections:
             return False
 
@@ -641,33 +606,38 @@ class ClanGloryBot:
 
         print(f"  Squad: Leader=G1({leader.account_uid}) -> {len(members)} members")
 
-        # Leader opens squad
-        await leader.open_squad(self.region)
+        # Leader opens squad and READS the response to get squad_code
+        squad_code = await leader.open_squad(self.region)
         await asyncio.sleep(2)
+
+        if not squad_code:
+            print(f"  ⚠ No squad_code received — squad may not form properly")
+            squad_code = str(leader.account_uid)  # fallback
 
         # Leader invites each member
         for member in members:
             await leader.send_invite(member.account_uid, self.region)
             await asyncio.sleep(1)
 
-        # Wait for invites
+        # Wait for invites to process
         await asyncio.sleep(2)
 
-        # Members join
+        # Members join using the REAL squad_code
         for member in members:
             try:
-                await member.join_squad(str(leader.account_uid))
-            except:
-                pass
+                await member.join_squad(squad_code)
+                print(f"  [G{member.index+1}] Joined squad with code: {squad_code[:20]}...")
+            except Exception as e:
+                print(f"  [G{member.index+1}] Join squad failed: {e}")
             await asyncio.sleep(1)
 
-        print(f"  Squad formed: {len(self.connections)} players")
+        print(f"  Squad formed: {len(self.connections)} players (code: {squad_code[:20]}...)")
         return True
 
     async def exploit_cycle(self) -> bool:
         """
         Single exploit cycle:
-          1. Form squad
+          1. Form squad (with proper squad_code)
           2. Queue Clash Squad
           3. Wait for matchmaking
           4. ALL exit immediately
@@ -701,6 +671,7 @@ class ClanGloryBot:
         for conn in self.connections:
             conn.in_squad = False
             conn.in_match = False
+            conn.squad_code = None
 
         # Wait for glory to credit
         print(f"  >> Waiting {self.post_exit_wait}s for glory credit...")
@@ -749,65 +720,56 @@ class ClanGloryBot:
                 # Run exploit
                 await self.exploit_cycle()
 
-                # Brief delay before re-queue
+                # Inter-cycle delay
                 await asyncio.sleep(REQUEUE_DELAY)
 
             except KeyboardInterrupt:
-                print("\n  STOPPING...")
+                print("\n  Stopped by user")
                 break
             except Exception as e:
                 print(f"  Cycle error: {e}")
-                import traceback
-                traceback.print_exc()
-                await asyncio.sleep(10)
+                await asyncio.sleep(RECONNECT_DELAY)
 
-        elapsed = time.time() - start_time
-
-        # Cleanup
-        print(f"\n{'='*60}")
+        elapsed = int(time.time() - start_time)
+        print("\n" + "=" * 60)
         print(f"  CLAN GLORY BOT — Done")
         print(f"  Cycles: {self.cycle_count}/{self.max_cycles}")
-        print(f"  Time: {elapsed:.0f}s ({elapsed/60:.1f} min)")
+        print(f"  Time: {elapsed}s ({elapsed // 60}m {elapsed % 60}s)")
         print(f"  Est glory: ~{self.total_glory_estimated}")
         print(f"  Guests: {len(self.connections)}")
         print(f"  Clan: {self.clan_id}")
-        print(f"{'='*60}")
+        print("=" * 60)
 
+        # Cleanup
         for conn in self.connections:
-            await conn.disconnect()
+            await conn.cleanup()
 
-    def stop(self):
-        self.running = False
+        # Save updated guests
+        with open(GUESTS_FILE, "w") as f:
+            json.dump([c.guest for c in self.connections], f, indent=2)
 
 
-# ======================== CLI ========================
+# ======================== ENTRY POINT ========================
 
 def main():
     import argparse
     p = argparse.ArgumentParser(description="Clan Glory Bot — Clash Squad Exit Exploit")
-    p.add_argument("--clan-id", type=int, default=DEFAULT_CLAN_ID,
-                   help=f"Clan ID (default: {DEFAULT_CLAN_ID})")
-    p.add_argument("--region", type=str, default=DEFAULT_REGION,
-                   help=f"Region (default: {DEFAULT_REGION})")
-    p.add_argument("--cycles", type=int, default=DEFAULT_CYCLES,
-                   help=f"Max cycles (default: {DEFAULT_CYCLES})")
-    p.add_argument("--match-wait", type=int, default=MATCHMAKING_WAIT,
-                   help=f"Matchmaking wait seconds (default: {MATCHMAKING_WAIT})")
-    p.add_argument("--exit-wait", type=int, default=POST_EXIT_WAIT,
-                   help=f"Post-exit wait seconds (default: {POST_EXIT_WAIT})")
+    p.add_argument("--clan-id", type=int, default=DEFAULT_CLAN_ID, help="Target clan ID")
+    p.add_argument("--region", type=str, default=DEFAULT_REGION, help="Region (ME, IND, BR, SG, etc.)")
+    p.add_argument("--cycles", type=int, default=DEFAULT_CYCLES, help="Max exploit cycles")
+    p.add_argument("--match-wait", type=int, default=MATCHMAKING_WAIT, help="Matchmaking wait (seconds)")
+    p.add_argument("--post-exit-wait", type=int, default=POST_EXIT_WAIT, help="Post-exit wait (seconds)")
     args = p.parse_args()
 
     bot = ClanGloryBot(
-        clan_id=args.clan_id,
-        region=args.region,
-        cycles=args.cycles,
-        matchmaking_wait=args.match_wait,
-        post_exit_wait=args.exit_wait,
+        clan_id=args.clan_id, region=args.region, cycles=args.cycles,
+        matchmaking_wait=args.match_wait, post_exit_wait=args.post_exit_wait
     )
 
-    def sig_handler(sig, frame):
-        bot.stop()
-    signal.signal(signal.SIGINT, sig_handler)
+    # Handle Ctrl+C
+    def stop_handler(sig, frame):
+        bot.running = False
+    signal.signal(signal.SIGINT, stop_handler)
 
     asyncio.run(bot.run())
 
