@@ -370,19 +370,33 @@ class GuestConnection:
         """
         result = {"owner_uid": None, "invite_code": None}
         all_data_hex = ""
+        # Read from BOTH online and chat channels — invite might arrive on either
         for _ in range(3):
             try:
                 data = await asyncio.wait_for(self.online_reader.read(9999), timeout=timeout / 3)
                 if data:
                     all_data_hex += data.hex()
             except asyncio.TimeoutError:
-                break
+                pass
             except:
-                break
+                pass
+            # Also try chat channel
+            if self.chat_reader:
+                try:
+                    chat_data = await asyncio.wait_for(self.chat_reader.read(9999), timeout=1.0)
+                    if chat_data:
+                        all_data_hex += chat_data.hex()
+                        print(f"  [G{self.index+1}] Got {len(chat_data.hex())} hex from CHAT channel")
+                except asyncio.TimeoutError:
+                    pass
+                except:
+                    pass
         if not all_data_hex:
             print(f"  [G{self.index+1}] No invite data")
             return result
         print(f"  [G{self.index+1}] Invite data: {len(all_data_hex)} hex chars")
+        if len(all_data_hex) <= 200:
+            print(f"  [G{self.index+1}] Raw hex: {all_data_hex}")
         # Strategy 1: search for 0500 and parse from there
         idx = all_data_hex.find("0500")
         while idx >= 0:
@@ -769,13 +783,13 @@ class GuestConnection:
 
     async def send_invite(self, target_uid: int, region: str, squad_size: int = 3):
         """SEnd_InV — invite a player to squad. Nu = squad size (3 for 3-player)."""
-        packet = await SEnd_InV(squad_size, target_uid, self.key, self.iv, region)
+        packet = await SEnd_InV(squad_size, target_uid, self.key, self.iv, region.lower())
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
 
     async def configure_squad(self, target_uid: int, region: str, squad_size: int = 3):
         """cHSq — configure squad for N players. Must be called BEFORE SEnd_InV."""
-        packet = await cHSq(squad_size, target_uid, self.key, self.iv, region)
+        packet = await cHSq(squad_size, target_uid, self.key, self.iv, region.lower())
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
 
@@ -993,16 +1007,16 @@ class ClanGloryBot:
         # TCP bot flow: OpEnSq -> cHSq(N, uid) -> SEnd_InV(N, uid)
         for member in members:
             print(f"  [G1] Configuring squad for G{member.index+1}...")
-            await leader.configure_squad(member.account_uid, self.region, squad_size)
+            await leader.configure_squad(member.uid, self.region.lower(), squad_size)
             await asyncio.sleep(0.3)
 
-            print(f"  [G1] Inviting G{member.index+1} (uid={member.account_uid})...")
-            await leader.send_invite(member.account_uid, self.region, squad_size)
+            print(f"  [G1] Inviting G{member.index+1} (game_uid={member.uid}, internal={member.account_uid})...")
+            await leader.send_invite(member.uid, self.region.lower(), squad_size)
             await asyncio.sleep(1)
 
         # Wait for invite packets to reach members
         print(f"  >> Waiting for invite packets to arrive...")
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
 
         # Step 3: Each member reads 0500 invite packet and accepts with ArohiAccepted
         # ArohiAccepted sends 0516 packet (not 0515) with owner_uid + invite_code
