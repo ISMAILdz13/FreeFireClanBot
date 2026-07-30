@@ -713,11 +713,52 @@ class GuestConnection:
             print(f"  [G{self.index+1}] Join error: {e}")
             return False
 
+    async def start_match_leader(self):
+        """LEADER sends start-match packets to actually START the match.
+        Sends THREE packet types to maximize chance of match starting:
+        1. field 1=269 (detailed, with device info) — real game client format
+        2. field 1=214 (simple start, d6 hex) — alternative start command
+        3. field 1=9 (basic) — fallback, same as members
+        """
+        pkt_type = get_packet_type(self.region)
+
+        # 1. Detailed start with device info (field 1=269)
+        fields_detailed = {
+            1: 269,
+            2: {
+                1: 8, 2: 8, 3: 11, 4: 1,
+                5: "samsung", 6: "SM-A145F", 7: "arm64-v8a",
+                8: "f538dc9b-cec9-43cd-8125-95f7f4f1f7e3",
+                9: "FFD58FB4F76F648C2A5E21EBCFA3AAE81B4C9B7D97",
+                10: "voice", 11: "V2059", 12: "mt6785",
+                13: "AFFD58FB4F76F648C2A5E21EBCFA3AAE81B4C9B7D97",
+                14: f"{self.region}_1999120752610979840",
+                15: 269
+            }
+        }
+        pkt_detailed = await GeneRaTePk((await CrEaTe_ProTo(fields_detailed)).hex(), pkt_type, self.key, self.iv)
+        await self.send_packet(pkt_detailed, channel="online")
+        print(f"  [G{self.index+1}] LEADER start-match #1 (field 1=269, detailed) sent!")
+        await asyncio.sleep(0.3)
+
+        # 2. Simple start (field 1=214)
+        fields_simple = {1: 214, 2: {1: 1}}
+        pkt_simple = await GeneRaTePk((await CrEaTe_ProTo(fields_simple)).hex(), pkt_type, self.key, self.iv)
+        await self.send_packet(pkt_simple, channel="online")
+        print(f"  [G{self.index+1}] LEADER start-match #2 (field 1=214, simple) sent!")
+        await asyncio.sleep(0.3)
+
+        # 3. Basic start (field 1=9, same as members)
+        fields_basic = {1: 9, 2: {1: self.account_uid}}
+        pkt_basic = await GeneRaTePk((await CrEaTe_ProTo(fields_basic)).hex(), pkt_type, self.key, self.iv)
+        await self.send_packet(pkt_basic, channel="online")
+        print(f"  [G{self.index+1}] LEADER start-match #3 (field 1=9, basic) sent!")
+
     async def spam_start_match(self, duration: float, delay: float):
-        """Spam start-match packets on the ONLINE socket.
-        FIX: Uses self.account_uid instead of hardcoded 12480598706."""
+        """Members spam 'I'm ready' packets (field 1=9) on the ONLINE socket.
+        The LEADER sends the actual start-match (field 1=269) separately."""
         fields = {
-            1: 9,
+            1: 9,  # Member ready signal
             2: {
                 1: self.account_uid,
             }
@@ -934,18 +975,26 @@ class ClanGloryBot:
         return True
 
     async def exploit_cycle(self) -> bool:
-        """Single glory cycle: form squad -> spam start -> wait -> leave."""
+        """Single glory cycle: form squad -> leader starts match -> members spam ready -> wait -> leave."""
         await self.form_squad()
         await asyncio.sleep(3)
 
-        print(f"  >> Spamming start-match for {SPAM_DURATION}s...")
+        # LEADER sends the actual start-match packet (field 1=269, detailed)
+        leader = self.connections[0]
+        if leader.connected:
+            print(f"  >> LEADER starting match (field 1=269, detailed device info)...")
+            await leader.start_match_leader()
+            await asyncio.sleep(1)
+
+        # ALL members (including leader) spam 'I'm ready' (field 1=9)
+        print(f"  >> Spamming ready packets (field 1=9) for {SPAM_DURATION}s...")
         tasks = []
         for conn in self.connections:
             if conn.connected:
                 tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         total_packets = sum(r for r in results if isinstance(r, int))
-        print(f"  >> Sent {total_packets} start-match packets total")
+        print(f"  >> Sent {total_packets} ready packets total")
 
         print(f"  >> Waiting {MATCH_WAIT}s for match completion...")
         for conn in self.connections:
@@ -954,7 +1003,33 @@ class ClanGloryBot:
             try:
                 resp = await asyncio.wait_for(conn.online_reader.read(9999), timeout=3.0)
                 if resp:
-                    print(f"  [G{conn.index+1}] Post-match data: {len(resp.hex())} hex, header={resp.hex()[:12]}")
+                    resp_hex = resp.hex()
+                    print(f"  [G{conn.index+1}] Post-match data: {len(resp_hex)} hex, header={resp_hex[:12]}")
+                    # Try to decode the response
+                    for skip in [10, 8, 12, 6, 14, 4]:
+                        try:
+                            payload = resp_hex[skip:]
+                            if len(payload) < 10:
+                                continue
+                            json_str = await DeCode_PackEt(payload)
+                            if json_str:
+                                parsed = json.loads(json_str)
+                                # Log key fields
+                                f1 = parsed.get('1', {})
+                                f3 = parsed.get('3', {})
+                                f5 = parsed.get('5', {})
+                                print(f"  [G{conn.index+1}] Decoded (offset {skip}): field1={f1}, field3={f3}")
+                                if isinstance(f5, dict) and 'data' in f5:
+                                    f5d = f5['data']
+                                    if isinstance(f5d, dict):
+                                        # Log match-related fields
+                                        for k in sorted(f5d.keys())[:10]:
+                                            v = f5d[k]
+                                            if isinstance(v, dict) and 'data' in v:
+                                                print(f"    5.{k} = {str(v['data'])[:60]}")
+                                break
+                        except:
+                            continue
                 else:
                     print(f"  [G{conn.index+1}] Post-match: connection closed")
             except asyncio.TimeoutError:
