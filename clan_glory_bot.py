@@ -1447,7 +1447,10 @@ class ClanGloryBot:
                         await conn.join_clan(self.clan_id)
                         await asyncio.sleep(2)
 
-                await self.exploit_cycle()
+                if self.solo_mode:
+                    await self.solo_cycle()
+                else:
+                    await self.exploit_cycle()
                 await asyncio.sleep(CYCLE_DELAY)
 
             except KeyboardInterrupt:
