@@ -39,7 +39,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TCP_DIR = os.path.join(BASE_DIR, "OB54-TCP-BOT")
 sys.path.insert(0, TCP_DIR)
 sys.path.insert(0, os.path.join(TCP_DIR, "Pb2"))
-sys.path.insert(0, os.path.join(BASE_DIR, "src", "proto", "compiled"))
+# NOTE: Do NOT add src/proto/compiled to path — it conflicts with Pb2 version
 
 import aiohttp
 from Crypto.Cipher import AES
@@ -50,8 +50,27 @@ from xC4 import (
     CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
     AuthClan, OpEnSq, SEnd_InV, GenJoinSquadsPacket, ExiT,
     AutH_GlobAl, EnC_Uid, EnC_Vr,
-    DeCode_PackEt, DEc_PacKeT, GeTSQDaTa
+    DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
+    EnC_PacKeT
 )
+
+# ======================== TCP AUTH TOKEN BUILDER ========================
+
+async def build_tcp_auth_token(uid: int, token: str, timestamp: int, key: bytes, iv: bytes) -> str:
+    """xAuThSTarTuP — builds the TCP auth startup token.
+    Matches the original client's authentication flow exactly."""
+    uid_hex = hex(uid)[2:]
+    uid_length = len(uid_hex)
+    encrypted_timestamp = await DecodE_HeX(timestamp)
+    encrypted_account_token = token.encode().hex()
+    encrypted_packet = await EnC_PacKeT(encrypted_account_token, key, iv)
+    encrypted_packet_length = hex(len(encrypted_packet) // 2)[2:]
+    if uid_length == 9: headers = '0000000'
+    elif uid_length == 8: headers = '00000000'
+    elif uid_length == 10: headers = '000000'
+    elif uid_length == 7: headers = '000000000'
+    else: headers = '0000000'
+    return f"0115{headers}{uid_hex}{encrypted_timestamp}00000{encrypted_packet_length}{encrypted_packet}"
 
 # ======================== CONFIG ========================
 
@@ -85,7 +104,7 @@ HTTP_HEADERS = {
 OAUTH_CLIENT_SECRET = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
 OAUTH_V2_URL = "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant"
 OAUTH_V1_URL = "https://100067.connect.garena.com/oauth/guest/token/grant"
-PORTS_URL = "https://loginbp.ggpolarbear.com/api/ports"
+# PORTS_URL removed — using GetLoginData endpoint instead
 MAJOR_LOGIN_URL = "https://loginbp.ggpolarbear.com/MajorLogin"
 CLAN_JOIN_URL = "https://clientbp.ggpolarbear.com/RequestClan"
 
@@ -162,26 +181,29 @@ async def build_major_login(open_id: str, access_token: str) -> bytes:
 
 
 async def get_login_data(jwt: str, server_url: str, access_token: str) -> dict:
-    """Get login data (whisper_ip:port + online_ip:port) via HTTP."""
+    """GetLoginData — POST to {server_url}/GetLoginData to get TCP endpoints.
+    Returns: online_ip, online_port, chat_ip, chat_port, clan_compiled_data, account_name."""
     try:
+        url = f"{server_url}/GetLoginData"
         async with aiohttp.ClientSession() as session:
-            async with session.post(server_url, data=jwt, headers={
+            async with session.post(url, data=jwt, headers={
                 **HTTP_HEADERS, "Authorization": f"Bearer {access_token}"
             }, ssl=False, timeout=aiohttp.ClientTimeout(total=20)) as r:
                 if r.status == 200:
                     data = await r.read()
-                    from MajoRLoGinrEs_pb2 import MajorLoginRes
-                    res = MajorLoginRes()
-                    res.ParseFromString(data)
-                    return {
-                        "whisper_ip": res.whisper_server_ip,
-                        "whisper_port": res.whisper_server_port,
-                        "online_ip": res.online_server_ip,
-                        "online_port": res.online_server_port,
-                        "server_url": server_url,
+                    from PorTs_pb2 import GetLoginData as GetLoginDataProto
+                    proto = GetLoginDataProto()
+                    proto.ParseFromString(data)
+                    result = {
+                        "online_ip_port": proto.Online_IP_Port,
+                        "chat_ip_port": proto.AccountIP_Port,
+                        "account_name": proto.AccountName,
+                        "clan_compiled_data": proto.Clan_Compiled_Data,
+                        "account_uid": proto.AccountUID,
                     }
+                    return result
     except Exception as e:
-        print(f"  Login data error: {e}")
+        print(f"  GetLoginData error: {e}")
     return {}
 
 
@@ -239,10 +261,11 @@ class GuestConnection:
         self._listen_task = None
 
     async def authenticate(self, session: aiohttp.ClientSession) -> bool:
-        """Full OAuth -> MajorLogin -> GetLoginData chain."""
+        """Full OAuth -> MajorLogin -> GetLoginData chain.
+        Returns TCP endpoints + clan data for this account."""
         print(f"  [G{self.index+1}] UID {self.uid}: Auth...")
 
-        # Refresh OAuth token
+        # Step 1: Refresh OAuth token
         at, oid = await refresh_oauth_token(self.guest)
         if at:
             self.access_token = at
@@ -252,8 +275,11 @@ class GuestConnection:
         else:
             at = self.access_token
             oid = self.open_id
+            if not at:
+                print(f"  [G{self.index+1}] No OAuth token")
+                return False
 
-        # MajorLogin
+        # Step 2: MajorLogin — get JWT, key, iv, server_url
         payload = await build_major_login(oid, at)
         try:
             async with session.post(MAJOR_LOGIN_URL, data=payload, headers={
@@ -266,73 +292,72 @@ class GuestConnection:
                 from MajoRLoGinrEs_pb2 import MajorLoginRes
                 res = MajorLoginRes()
                 res.ParseFromString(data)
+
+                # Check if banned (no token returned)
+                if not res.token:
+                    print(f"  [G{self.index+1}] BANNED (no token in MajorLogin response)")
+                    return False
+
                 self.jwt = res.token
-                self.key = bytes(res.secret_key, 'utf-8')
-                self.iv = bytes(res.secret_iv, 'utf-8')
-                self.server_url = res.server
-                # Parse account UID from JWT (it's encoded in the token)
-                self.account_uid = res.uid if hasattr(res, 'uid') else 0
+                self.key = res.key          # bytes (field 22)
+                self.iv = res.iv            # bytes (field 23)
+                self.server_url = res.url   # field 10
+                self.account_uid = res.account_uid  # field 1
+                self.timestamp = res.timestamp      # field 21
                 print(f"  [G{self.index+1}] JWT OK uid={self.account_uid}")
         except Exception as e:
-            print(f"  [G{self.index+1}] MajorLogin FAIL: {e}")
+            err = str(e)
+            if "BLACKLIST" in err.upper():
+                print(f"  [G{self.index+1}] BANNED (blacklist info in response)")
+            else:
+                print(f"  [G{self.index+1}] MajorLogin FAIL: {err[:80]}")
             return False
 
-        # Get login data (ports + IPs)
+        # Step 3: GetLoginData — get TCP endpoints + clan compiled data
         login_data = await get_login_data(self.jwt, self.server_url, at)
         if not login_data:
-            print(f"  [G{self.index+1}] No login data")
+            print(f"  [G{self.index+1}] GetLoginData FAIL")
             return False
 
-        self.whisper_ip = login_data.get("whisper_ip", "")
-        self.whisper_port = login_data.get("whisper_port", 0)
-        self.online_ip = login_data.get("online_ip", "")
-        self.online_port = login_data.get("online_port", 0)
+        online_ip_port = login_data.get("online_ip_port", "")
+        chat_ip_port = login_data.get("chat_ip_port", "")
 
-        if not self.online_ip:
-            # Parse ports from PorTs_pb2
-            try:
-                async with session.post(PORTS_URL, data=self.jwt, headers={
-                    **HTTP_HEADERS, "Authorization": f"Bearer {at}"
-                }, ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                    if r.status == 200:
-                        from PorTs_pb2 import Ports
-                        ports = Ports()
-                        ports.ParseFromString(await r.read())
-                        self.whisper_ip = ports.whisper_server_ip
-                        self.whisper_port = ports.whisper_server_port
-                        self.online_ip = ports.online_server_ip
-                        self.online_port = ports.online_server_port
-            except:
-                pass
-
-        if not self.online_ip:
-            print(f"  [G{self.index+1}] No TCP endpoints")
+        if ":" not in online_ip_port or ":" not in chat_ip_port:
+            print(f"  [G{self.index+1}] No TCP endpoints in GetLoginData")
             return False
 
-        print(f"  [G{self.index+1}] TCP: {self.online_ip}:{self.online_port} | {self.whisper_ip}:{self.whisper_port}")
+        self.online_ip, online_port_str = online_ip_port.rsplit(":", 1)
+        self.online_port = int(online_port_str)
+        self.chat_ip, chat_port_str = chat_ip_port.rsplit(":", 1)
+        self.chat_port = int(chat_port_str)
+        self.clan_compiled_data = login_data.get("clan_compiled_data", "")
+
+        print(f"  [G{self.index+1}] TCP: {self.online_ip}:{self.online_port} | {self.chat_ip}:{self.chat_port}")
         return True
 
     async def connect_tcp(self) -> bool:
-        """Connect to Online + Chat TCP servers."""
+        """Connect to Online + Chat TCP servers using xAuThSTarTuP token."""
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
         try:
+            # Build the proper TCP auth token using xAuThSTarTuP
+            auth_token_hex = await build_tcp_auth_token(
+                self.account_uid, self.jwt, self.timestamp, self.key, self.iv)
+            auth_token_bytes = bytes.fromhex(auth_token_hex)
+
             # Online connection
             self.online_reader, self.online_writer = await asyncio.open_connection(
                 self.online_ip, self.online_port, ssl=ssl_ctx)
+            self.online_writer.write(auth_token_bytes)
+            await self.online_writer.drain()
+
             # Chat (Whisper) connection
             self.chat_reader, self.chat_writer = await asyncio.open_connection(
-                self.whisper_ip, self.whisper_port, ssl=ssl_ctx)
-
-            # Send auth token on both
-            if self.jwt:
-                token_bytes = bytes.fromhex(self.jwt) if all(c in '0123456789abcdef' for c in self.jwt) else self.jwt.encode()
-                self.online_writer.write(token_bytes)
-                await self.online_writer.drain()
-                self.chat_writer.write(token_bytes)
-                await self.chat_writer.drain()
+                self.chat_ip, self.chat_port, ssl=ssl_ctx)
+            self.chat_writer.write(auth_token_bytes)
+            await self.chat_writer.drain()
 
             await asyncio.sleep(1)
 
@@ -363,7 +388,7 @@ class GuestConnection:
         await asyncio.sleep(PACKET_INTERVAL)
 
     async def join_clan(self, clan_id: int):
-        """AuthClan — join guild (sent to CHAT channel)."""
+        """AuthClan — join guild (sent to CHAT channel, uses clan_compiled_data)."""
         auth_data = self.clan_compiled_data if hasattr(self, 'clan_compiled_data') and self.clan_compiled_data else self.jwt
         packet = await AuthClan(clan_id, auth_data, self.key, self.iv)
         await self.send_packet(packet, channel="chat")
