@@ -257,19 +257,14 @@ async def get_login_data(session, base_url: str, login_payload: bytes, jwt: str)
 
 
 def build_tcp_auth_token(account_uid: int, jwt: str, timestamp: int, key: bytes, iv: bytes) -> str:
-    """Build TCP auth startup token (xAuThSTarTuP equivalent)."""
+    """Build TCP auth startup token (matches xAuThSTarTuP exactly)."""
     uid_hex = hex(account_uid)[2:]
     uid_length = len(uid_hex)
 
-    ts = timestamp
-    ts_bytes = []
-    while ts > 0:
-        b = ts & 0x7F
-        ts >>= 7
-        if ts > 0:
-            b |= 0x80
-        ts_bytes.append(b)
-    encrypted_timestamp = bytes(ts_bytes).hex()
+    # Timestamp: plain hex conversion (NOT varint) — matches DecodE_HeX()
+    ts_hex = hex(timestamp)[2:]
+    if len(ts_hex) == 1:
+        ts_hex = "0" + ts_hex
 
     token_hex = jwt.encode().hex()
     encrypted_packet = EnC_PacKeT_sync(token_hex, key, iv)
@@ -281,7 +276,7 @@ def build_tcp_auth_token(account_uid: int, jwt: str, timestamp: int, key: bytes,
     elif uid_length == 7:  headers = '000000000'
     else:                  headers = '0000000'
 
-    return f"0115{headers}{uid_hex}{encrypted_timestamp}00000{encrypted_packet_length}{encrypted_packet}"
+    return f"0115{headers}{uid_hex}{ts_hex}00000{encrypted_packet_length}{encrypted_packet}"
 
 
 def get_packet_type(region: str) -> str:
