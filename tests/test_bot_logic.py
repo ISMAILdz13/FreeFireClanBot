@@ -294,5 +294,27 @@ class TestVersionConsistencyInBot(unittest.TestCase):
                            f"Old version {old_ver} found in clan_glory_bot.py!")
 
 
+class TestJoinDelayConfig(unittest.TestCase):
+    """Test the configurable join delay feature."""
+
+    def test_join_delay_default(self):
+        """join_delay should default to 3.0."""
+        bot = ClanGloryBot()
+        self.assertEqual(bot.join_delay, 3.0)
+
+    def test_join_delay_custom(self):
+        """join_delay should be settable."""
+        bot = ClanGloryBot()
+        bot.join_delay = 5.0
+        self.assertEqual(bot.join_delay, 5.0)
+
+    def test_join_delay_in_init(self):
+        """join_delay should be initialized in __init__."""
+        conn = GuestConnection(make_mock_guest(), 0)
+        # GuestConnection doesn't have join_delay, but ClanGloryBot does
+        bot = ClanGloryBot()
+        self.assertTrue(hasattr(bot, 'join_delay'))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

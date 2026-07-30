@@ -817,6 +817,7 @@ class ClanGloryBot:
     def __init__(self, clan_id: int = DEFAULT_CLAN_ID, region: str = DEFAULT_REGION,
                  cycles: int = DEFAULT_CYCLES):
         self.solo_mode = False
+        self.join_delay = 3.0
         self.clan_id = clan_id
         self.region = region
         self.max_cycles = cycles
@@ -967,8 +968,8 @@ class ClanGloryBot:
                 continue
             # First member joins immediately, subsequent members wait longer
             if i > 0:
-                print(f"  Waiting 3s before next member join (server sync)...")
-                await asyncio.sleep(3)
+                print(f"  Waiting {self.join_delay}s before next member join (server sync)...")
+                await asyncio.sleep(self.join_delay)
             
             print(f"  [G{member.index+1}] Joining team {team_code}...")
             joined = await member.join_team(team_code)
@@ -1420,6 +1421,7 @@ class ClanGloryBot:
         print(f"  Max cycles: {self.max_cycles}")
         if self.solo_mode:
             print(f"  Mode: SOLO (independent matchmaking)")
+        print(f"  Join delay: {self.join_delay}s")
         cycle_time = SPAM_DURATION + MATCH_WAIT + int(CYCLE_DELAY)
         print(f"  Per cycle: ~{cycle_time}s")
         print(f"  Est total time: ~{(self.max_cycles * cycle_time) // 60} min")
@@ -1497,6 +1499,7 @@ def main():
     p.add_argument("--spam-duration", type=int, default=SPAM_DURATION, help="Start-match spam duration (seconds)")
     p.add_argument("--spam-delay", type=float, default=SPAM_DELAY, help="Delay between start packets")
     p.add_argument("--solo", action="store_true", default=False, help="Solo matchmaking (no squad, each bot independently)")
+    p.add_argument("--join-delay", type=float, default=3.0, help="Delay between member joins (seconds)")
     args = p.parse_args()
 
     SPAM_DURATION = args.spam_duration
@@ -1509,6 +1512,7 @@ def main():
         cycles=args.cycles,
     )
     bot.solo_mode = args.solo
+    bot.join_delay = getattr(args, "join_delay", 3.0)
 
     def stop_handler(sig, frame):
         bot.running = False
