@@ -642,7 +642,7 @@ class GuestConnection:
         Reads up to 3 times, searches for '0500' packet type.
         Extracts: owner_uid (5.1), invite_code (5.8), chat_code (5.17), squad_code (5.31).
         """
-        result = {"owner_uid": None, "invite_code": None, "chat_code": None, "squad_code": None}
+        result = {"owner_uid": None, "invite_code": None, "chat_code": None, "squad_code": None, "team_code": None}
         all_data_hex = ""
         for _ in range(3):
             try:
@@ -677,14 +677,6 @@ class GuestConnection:
                         if '5' not in packet_json:
                             continue
                         field5 = packet_json['5']
-                        # DUMP full JSON for debugging
-                        import json as _json
-                        print(f"  [G{self.index+1}] === FULL OpEnSq JSON ===")
-                        try:
-                            print(_json.dumps(packet_json, indent=2, default=str)[:3000])
-                        except:
-                            print(str(packet_json)[:3000])
-                        print(f"  [G{self.index+1}] === END JSON ===")
                         if not isinstance(field5, dict) or 'data' not in field5:
                             continue
                         field5_data = field5['data']
@@ -704,6 +696,15 @@ class GuestConnection:
                         f17 = field5_data.get('17', {})
                         if isinstance(f17, dict) and 'data' in f17:
                             result["chat_code"] = str(f17['data'])
+                        # Extract team_code from field 5.6.4 (short code for joining)
+                        f6 = field5_data.get('6', {})
+                        if isinstance(f6, dict) and 'data' in f6:
+                            f6_data = f6['data']
+                            if isinstance(f6_data, dict):
+                                f6_4 = f6_data.get('4', {})
+                                if isinstance(f6_4, dict) and 'data' in f6_4:
+                                    result["team_code"] = str(f6_4['data'])
+                                    print(f"  [G{self.index+1}] Team code (5.6.4): {result['team_code']}")
                         f31 = field5_data.get('31', {})
                         if isinstance(f31, dict) and 'data' in f31:
                             result["squad_code"] = str(f31['data'])
@@ -792,24 +793,25 @@ class GuestConnection:
         await self.send_packet(packet)
         await asyncio.sleep(PACKET_INTERVAL)
 
-    async def join_squad(self, squad_code: str):
-        """Join squad — tries level bot simple format first, then TCP bot format."""
-        # Extract numeric part from squad_code (e.g. "1785406884129332808_wny7qxnck8" -> 1785406884129332808)
-        numeric_part = squad_code.split('_')[0] if '_' in squad_code else squad_code
-
-        # Method 1: Level bot simple format — {1: 4, 2: {1: 1, 2: int(code)}}
+    async def join_squad(self, code: str):
+        """Join squad with team_code (short number from field 5.6.4) or squad_code.
+        Uses GenJoinSquadsPacket format: {1: 4, 2: {1: 1, 2: int(code)}}
+        Sends on BOTH online + chat channels (level bot uses whisper/chat).
+        """
+        # If code has underscore, take numeric part; otherwise use as-is
+        numeric_part = code.split('_')[0] if '_' in code else code
         try:
             from xC4 import CrEaTe_ProTo, GeneRaTePk
             fields = {1: 4, 2: {1: 1, 2: int(numeric_part)}}
             proto_hex = (await CrEaTe_ProTo(fields)).hex()
             simple_packet = await GeneRaTePk(proto_hex, '0515', self.key, self.iv)
-            # Level bot sends join on WHISPER channel — try BOTH channels
+            # Send on BOTH channels — level bot uses whisper/chat for join
             await self.send_packet(simple_packet, channel="online")
             await asyncio.sleep(0.2)
             await self.send_packet(simple_packet, channel="chat")
             await asyncio.sleep(PACKET_INTERVAL)
             self.in_squad = True
-            print(f"  [G{self.index+1}] Joined via simple format (0515, sent on BOTH channels, field 2.2={numeric_part[:15]}...)")
+            print(f"  [G{self.index+1}] Join packet sent (0515, code={numeric_part}, both channels)")
             return
         except Exception as e:
             print(f"  [G{self.index+1}] Simple join failed ({e}), trying TCP bot format...")
@@ -1002,8 +1004,9 @@ class ClanGloryBot:
         owner_uid = leader_response.get("owner_uid") or str(leader.account_uid)
         chat_code = leader_response.get("chat_code")
         squad_code = leader_response.get("squad_code")
+        team_code = leader_response.get("team_code")
 
-        print(f"  Leader: owner={owner_uid}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}")
+        print(f"  Leader: owner={owner_uid}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}, team_code={team_code}")
 
         # Step 2: For each member — cHSq (configure) + SEnd_InV (invite)
         # TCP bot flow: OpEnSq -> cHSq(N, uid) -> SEnd_InV(N, uid)
@@ -1045,9 +1048,18 @@ class ClanGloryBot:
                         print(f"  [G{member.index+1}] ✅ Accepted invite (no chat code)")
 
                     member.in_squad = True
+                elif team_code:
+                    # PRIMARY: join with team_code (field 5.6.4) — the short code
+                    print(f"  [G{member.index+1}] Joining with team_code: {team_code}")
+                    await member.join_squad(team_code)
+                    if chat_code:
+                        chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
+                        await member.send_packet(chat_auth_packet, channel="chat")
+                    member.in_squad = True
+                    print(f"  [G{member.index+1}] ✅ Joined via team_code ({team_code})")
                 elif squad_code:
-                    # Fallback: try GenJoinSquadsPacket with squad_code
-                    print(f"  [G{member.index+1}] No invite code, trying squad_code fallback...")
+                    # Fallback: try with full squad_code
+                    print(f"  [G{member.index+1}] No team_code, trying squad_code fallback...")
                     await member.join_squad(squad_code)
                     if chat_code:
                         chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
