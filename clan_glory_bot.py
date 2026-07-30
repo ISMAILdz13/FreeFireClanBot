@@ -1106,8 +1106,10 @@ class ClanGloryBot:
                         continue
 
                 # STRATEGY 2: Try raw DeCode_PackEt at all offsets
-                print(f"  [G{conn.index+1}] {channel_name}: trying raw DeCode_PackEt at offsets 0-20...")
-                for skip in range(0, min(22, len(resp_hex)), 2):
+                # Only accept decodes where f2 is a positive integer (real packet type)
+                print(f"  [G{conn.index+1}] {channel_name}: trying raw DeCode_PackEt at offsets 0-30...")
+                found_match_packet = False
+                for skip in range(0, min(32, len(resp_hex)), 2):
                     try:
                         payload = resp_hex[skip:]
                         if len(payload) < 20:
@@ -1118,63 +1120,92 @@ class ClanGloryBot:
                         parsed = json.loads(json_str)
                         f2 = parsed.get('2', {})
                         f2_val = f2.get('data') if isinstance(f2, dict) else f2
-                        # Only log if f2 has a value (meaningful decode)
-                        if f2_val is not None:
-                            print(f"  [G{conn.index+1}] {channel_name} RAW (offset {skip}): f2={f2_val}")
-                            f5 = parsed.get('5', {})
-                            if isinstance(f5, dict) and 'data' in f5:
-                                f5d = f5['data']
-                                if isinstance(f5d, dict):
-                                    for k in sorted(f5d.keys())[:15]:
-                                        v = f5d[k]
-                                        if isinstance(v, dict) and 'data' in v:
-                                            print(f"    5.{k} = {str(v['data'])[:80]}")
-                            f6 = parsed.get('6', {})
-                            if isinstance(f6, dict) and 'data' in f6:
-                                f6d = f6['data']
-                                if isinstance(f6d, dict):
-                                    for k in sorted(f6d.keys())[:10]:
-                                        v = f6d[k]
-                                        if isinstance(v, dict) and 'data' in v:
-                                            print(f"    6.{k} = {str(v['data'])[:80]}")
-                            break
+                        # ONLY accept if f2 is a positive integer (real packet type like 5, 18, etc.)
+                        if not isinstance(f2_val, int) or f2_val < 1:
+                            continue
+                        print(f"  [G{conn.index+1}] {channel_name} RAW (offset {skip}): f2={f2_val}")
+                        # Full decode of ALL top-level fields
+                        for k in sorted(parsed.keys()):
+                            v = parsed[k]
+                            if isinstance(v, dict) and 'data' in v:
+                                vdata = v['data']
+                                if isinstance(vdata, dict):
+                                    # Nested — show first 200 chars
+                                    print(f"    {k} = {str(vdata)[:200]}")
+                                else:
+                                    print(f"    {k} = {vdata}")
+                        # Deep decode f5
+                        f5 = parsed.get('5', {})
+                        if isinstance(f5, dict) and 'data' in f5:
+                            f5d = f5['data']
+                            if isinstance(f5d, dict):
+                                print(f"    --- Field 5 deep decode ---")
+                                for k in sorted(f5d.keys())[:20]:
+                                    v = f5d[k]
+                                    if isinstance(v, dict) and 'data' in v:
+                                        vdata = v['data']
+                                        if isinstance(vdata, dict):
+                                            print(f"    5.{k} = {str(vdata)[:200]}")
+                                        else:
+                                            print(f"    5.{k} = {vdata}")
+                        # Deep decode f6
+                        f6 = parsed.get('6', {})
+                        if isinstance(f6, dict) and 'data' in f6:
+                            f6d = f6['data']
+                            if isinstance(f6d, dict):
+                                print(f"    --- Field 6 deep decode ---")
+                                for k in sorted(f6d.keys())[:15]:
+                                    v = f6d[k]
+                                    if isinstance(v, dict) and 'data' in v:
+                                        print(f"    6.{k} = {str(v['data'])[:200]}")
+                        if f2_val == 18:
+                            found_match_packet = True
+                            print(f"  *** MATCH PACKET FOUND (f2=18) for G{conn.index+1}! ***")
+                        break
                     except:
                         continue
 
-                # STRATEGY 3: Search for known packet type headers in raw hex
-                for ptype in ['0500', '0514', '0515', '0519', '051a', '051b', '051c', '051d']:
-                    idx = resp_hex.find(ptype)
-                    if idx >= 0 and idx < 100:
-                        print(f"  [G{conn.index+1}] {channel_name}: found packet type {ptype} at hex offset {idx}")
-                        # Try to decode from that position
-                        for skip in [idx + 10, idx + 8, idx + 12, idx + 6]:
+                # STRATEGY 3: If raw decode didn't find f2=18, search for '1012' pattern
+                # Protobuf: field 2 (varint) = 18 → bytes 10 12
+                if not found_match_packet:
+                    idx = resp_hex.find('1012')
+                    while idx >= 0 and idx < len(resp_hex) - 20:
+                        # Try decoding from a few bytes before the 1012 pattern
+                        for back in [2, 4, 6, 8, 10, 0]:
+                            start = max(0, idx - back)
                             try:
-                                payload = resp_hex[skip:]
-                                if len(payload) < 20:
-                                    continue
-                                # Try both raw and decrypted
-                                for label, data in [("raw", payload), ("dec", None)]:
-                                    if label == "dec":
-                                        data = await DEc_PacKeT(payload, conn.key, conn.iv)
-                                        if not data:
-                                            continue
-                                    json_str = await DeCode_PackEt(data)
-                                    if json_str:
-                                        parsed = json.loads(json_str)
-                                        f2 = parsed.get('2', {})
-                                        f2_val = f2.get('data') if isinstance(f2, dict) else f2
-                                        print(f"  [G{conn.index+1}] {channel_name} @{ptype}+{skip-idx} ({label}): f2={f2_val}")
+                                payload = resp_hex[start:]
+                                json_str = await DeCode_PackEt(payload)
+                                if json_str:
+                                    parsed = json.loads(json_str)
+                                    f2 = parsed.get('2', {})
+                                    f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                                    if f2_val == 18:
+                                        print(f"  [G{conn.index+1}] {channel_name} PATTERN MATCH (1012 at {idx}, back {back}): f2=18")
+                                        f1 = parsed.get('1', {})
+                                        f1_val = f1.get('data') if isinstance(f1, dict) else f1
+                                        print(f"    f1={f1_val}, f2=18")
                                         f5 = parsed.get('5', {})
                                         if isinstance(f5, dict) and 'data' in f5:
                                             f5d = f5['data']
                                             if isinstance(f5d, dict):
-                                                for k in sorted(f5d.keys())[:10]:
+                                                for k in sorted(f5d.keys())[:20]:
                                                     v = f5d[k]
                                                     if isinstance(v, dict) and 'data' in v:
-                                                        print(f"    5.{k} = {str(v['data'])[:60]}")
+                                                        print(f"    5.{k} = {str(v['data'])[:200]}")
+                                        print(f"  *** MATCH PACKET FOUND via pattern search! ***")
+                                        found_match_packet = True
                                         break
                             except:
                                 continue
+                        if found_match_packet:
+                            break
+                        idx = resp_hex.find('1012', idx + 2)
+
+                if not found_match_packet:
+                    print(f"  [G{conn.index+1}] {channel_name}: no f2=18 match packet found in {len(resp_hex)} hex")
+
+
         await asyncio.sleep(max(0, MATCH_WAIT - 5))
 
         print(f"  >> Leaving team...")
