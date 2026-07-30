@@ -320,6 +320,10 @@ class GuestConnection:
         self.region = "ME"
         self._listen_task = None
 
+    def set_region(self, region: str):
+        """Set the region for packet type mapping."""
+        self.region = region
+
     async def authenticate(self, session: aiohttp.ClientSession) -> bool:
         """Full OAuth -> MajorLogin -> GetLoginData chain.
         Returns TCP endpoints + clan data for this account."""
