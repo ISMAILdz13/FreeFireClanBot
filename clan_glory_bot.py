@@ -249,6 +249,7 @@ async def get_login_data(session, base_url: str, login_payload: bytes, jwt: str)
                     "account_uid": proto.AccountUID,
                     "account_name": proto.AccountName,
                     "clan_id": proto.Clan_ID,
+                    "clan_compiled_data": proto.Clan_Compiled_Data,
                     "region": proto.Region,
                 }
     except Exception as e:
@@ -303,6 +304,7 @@ class GuestConnection:
         self.timestamp: int = 0
         self.account_uid: int = 0
         self.account_name: str = ""
+        self.clan_compiled_data: str = ""
 
         self.online_ip: str = ""
         self.online_port: int = 0
@@ -349,6 +351,7 @@ class GuestConnection:
         self.chat_ip = login_data["chat_ip"]
         self.chat_port = login_data["chat_port"]
         self.account_name = login_data.get("account_name", "")
+        self.clan_compiled_data = login_data.get("clan_compiled_data", "")
 
         print(f"  [G{self.index+1}] TCP: {self.online_ip}:{self.online_port} | {self.chat_ip}:{self.chat_port}")
         return True
@@ -375,6 +378,8 @@ class GuestConnection:
 
             print(f"  [G{self.index+1}] TCP OK")
             self.connected = True
+            # Give server time to process auth
+            await asyncio.sleep(0.5)
             return True
         except Exception as e:
             print(f"  [G{self.index+1}] TCP FAIL: {e}")
@@ -397,9 +402,10 @@ class GuestConnection:
         await asyncio.sleep(PACKET_INTERVAL)
 
     async def join_clan(self, clan_id: int):
-        """AuthClan — join guild."""
-        packet = await AuthClan(clan_id, self.jwt, self.key, self.iv)
-        await self.send_packet(packet)
+        """AuthClan — join guild (sent to CHAT channel, uses clan_compiled_data)."""
+        auth_data = self.clan_compiled_data if self.clan_compiled_data else self.jwt
+        packet = await AuthClan(clan_id, auth_data, self.key, self.iv)
+        await self.send_packet(packet, channel="chat")
         await asyncio.sleep(PACKET_INTERVAL)
 
     async def open_squad(self, region: str):
@@ -453,7 +459,7 @@ class GuestConnection:
         """Background reader for Online TCP — detect match start/end."""
         while self.connected and self.online_reader:
             try:
-                data = await asyncio.wait_for(self.online_reader.read(4096), timeout=1.0)
+                data = await self.online_reader.read(9999)
                 if not data:
                     print(f"  [G{self.index+1}] Online closed by server")
                     self.connected = False
@@ -466,8 +472,6 @@ class GuestConnection:
                 elif hex_data.startswith("0515") and not self.match_started:
                     # Potential match start notification
                     self.match_started = True
-            except asyncio.TimeoutError:
-                continue
             except Exception as e:
                 print(f"  [G{self.index+1}] Listen err: {e}")
                 self.connected = False
@@ -543,10 +547,7 @@ class ClanGloryBot:
                 # Start listener
                 asyncio.create_task(conn.listen_online())
 
-                # Send global auth
-                await conn.send_global_auth()
-
-                # Join clan
+                # Join clan (sends AuthClan to chat channel)
                 await conn.join_clan(self.clan_id)
 
                 self.connections.append(conn)
@@ -671,7 +672,6 @@ class ClanGloryBot:
                     if not conn.connected:
                         print(f"  [G{conn.index+1}] Reconnecting...")
                         await conn.connect_tcp()
-                        await conn.send_global_auth()
                         await conn.join_clan(self.clan_id)
                         await asyncio.sleep(2)
 
