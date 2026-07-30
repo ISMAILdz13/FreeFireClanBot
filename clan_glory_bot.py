@@ -834,16 +834,38 @@ class GuestConnection:
                     print(f"  [G{self.index+1}] No join response (server silent)")
             except asyncio.TimeoutError:
                 print(f"  [G{self.index+1}] No join response (timeout)")
-            return
         except Exception as e:
-            print(f"  [G{self.index+1}] Simple join failed ({e}), trying TCP bot format...")
+            print(f"  [G{self.index+1}] Join error: {e}")
+            self.in_squad = False
 
-        # Method 2: TCP bot GenJoinSquadsPacket — {1: 4, 2: {5: str(code), 6: 6, ...}}
-        packet = await GenJoinSquadsPacket(squad_code, self.key, self.iv)
-        await self.send_packet(packet)
+    async def accept_invite(self, owner_uid: str, invite_code: str):
+        """Accept squad invite — TCP bot's ArohiAccepted format.
+        field 1=4, 2.1=owner_uid, 2.3=owner_uid, 2.8=1, 2.9=version, 2.10=str(code)
+        """
+        fields = {
+            1: 4,
+            2: {
+                1: int(owner_uid) if owner_uid else 1,
+                3: int(owner_uid) if owner_uid else 1,
+                8: 1,
+                9: {
+                    2: 161,
+                    4: "y[WW",
+                    6: 11,
+                    8: "1.114.18",
+                    9: 3,
+                    10: 1
+                },
+                10: str(invite_code),
+            }
+        }
+        proto_bytes = await CrEaTe_ProTo(fields)
+        pkt_type = get_packet_type(self.region if hasattr(self, 'region') else "ME")
+        packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
+        await self.send_packet(packet, channel="online")
         await asyncio.sleep(PACKET_INTERVAL)
         self.in_squad = True
-        print(f"  [G{self.index+1}] Joined via GenJoinSquadsPacket (0515, field 2.5)")
+        print(f"  [G{self.index+1}] Accept invite sent (ArohiAccepted format)")
 
     async def spam_start_match(self, duration: float, delay: float):
         """Spam start-match packets on the ONLINE socket for the given duration.
@@ -1038,19 +1060,20 @@ class ClanGloryBot:
         print(f"  Leader: owner={owner_uid}, chat={'Y' if chat_code else 'N'}, squad={'Y' if squad_code else 'N'}, team_code={team_code}")
 
         # Step 2: For each member — cHSq (configure) + SEnd_InV (invite)
-        # TCP bot flow: OpEnSq -> cHSq(N, uid) -> SEnd_InV(N, uid)
+        # CRITICAL: Use INTERNAL UID (account_uid), NOT game UID (uid)
+        # The server only recognizes internal UIDs for squad operations
         for member in members:
             print(f"  [G1] Configuring squad for G{member.index+1}...")
-            await leader.configure_squad(member.uid, self.region.lower(), squad_size)
+            await leader.configure_squad(member.account_uid, self.region.lower(), squad_size)
             await asyncio.sleep(0.3)
 
-            print(f"  [G1] Inviting G{member.index+1} (game_uid={member.uid}, internal={member.account_uid})...")
-            await leader.send_invite(member.uid, self.region.lower(), squad_size)
+            print(f"  [G1] Inviting G{member.index+1} (internal_uid={member.account_uid}, game_uid={member.uid})...")
+            await leader.send_invite(member.account_uid, self.region.lower(), squad_size)
             await asyncio.sleep(1)
 
         # Wait for invite packets to reach members
         print(f"  >> Waiting for invite packets to arrive...")
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
 
         # Step 3: Each member reads 0500 invite packet and accepts with ArohiAccepted
         # ArohiAccepted sends 0516 packet (not 0515) with owner_uid + invite_code
@@ -1078,23 +1101,24 @@ class ClanGloryBot:
 
                     member.in_squad = True
                 elif team_code:
-                    # PRIMARY: join with team_code (field 5.6.4) — the short code
-                    print(f"  [G{member.index+1}] Joining with team_code: {team_code}")
-                    await member.join_squad(team_code)
+                    # Fallback 1: ArohiAccepted format with team_code as string code
+                    # This is the TCP bot's exact format: {1: 4, 2: {1: owner_uid, 3: owner_uid, 8: 1, 9: {version}, 10: str(code)}}
+                    print(f"  [G{member.index+1}] No invite arrived. Trying ArohiAccepted with team_code: {team_code}")
+                    await member.accept_invite(owner_uid, team_code)
                     if chat_code:
                         chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
                         await member.send_packet(chat_auth_packet, channel="chat")
                     member.in_squad = True
-                    print(f"  [G{member.index+1}] ✅ Joined via team_code ({team_code})")
+                    print(f"  [G{member.index+1}] ✅ ArohiAccepted sent with team_code ({team_code})")
                 elif squad_code:
-                    # Fallback: try with full squad_code
-                    print(f"  [G{member.index+1}] No team_code, trying squad_code fallback...")
-                    await member.join_squad(squad_code)
+                    # Fallback 2: ArohiAccepted with squad_code
+                    print(f"  [G{member.index+1}] Trying ArohiAccepted with squad_code...")
+                    await member.accept_invite(owner_uid, squad_code)
                     if chat_code:
                         chat_auth_packet = await AutH_Chat(3, owner_uid, chat_code, member.key, member.iv)
                         await member.send_packet(chat_auth_packet, channel="chat")
                     member.in_squad = True
-                    print(f"  [G{member.index+1}] ⚠ Joined via squad_code fallback")
+                    print(f"  [G{member.index+1}] ⚠ ArohiAccepted sent with squad_code")
                 else:
                     print(f"  [G{member.index+1}] ❌ No invite code and no squad code — cannot join")
             except Exception as e:
