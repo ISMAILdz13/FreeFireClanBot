@@ -316,5 +316,66 @@ class TestJoinDelayConfig(unittest.TestCase):
         self.assertTrue(hasattr(bot, 'join_delay'))
 
 
+class TestDryRunMode(unittest.IsolatedAsyncioTestCase):
+    """Test the --dry-run flag behavior."""
+
+    def test_dry_run_default(self):
+        """dry_run should default to False."""
+        bot = ClanGloryBot()
+        self.assertFalse(bot.dry_run)
+
+    def test_dry_run_settable(self):
+        """dry_run should be settable."""
+        bot = ClanGloryBot()
+        bot.dry_run = True
+        self.assertTrue(bot.dry_run)
+
+    async def test_dry_run_exits_before_cycles(self):
+        """When dry_run=True, run() should exit after setup without running cycles."""
+        bot = ClanGloryBot(cycles=5)
+        bot.dry_run = True
+        conn = make_mock_connection()
+        bot.connections = [conn]
+
+        with patch.object(bot, 'setup', new_callable=AsyncMock, return_value=True):
+            with patch.object(bot, 'solo_cycle', new_callable=AsyncMock) as mock_solo:
+                with patch.object(bot, 'exploit_cycle', new_callable=AsyncMock) as mock_exploit:
+                    with patch.object(bot, 'cleanup_connections', new_callable=AsyncMock):
+                        await bot.run()
+
+                    mock_solo.assert_not_called()
+                    mock_exploit.assert_not_called()
+
+
+class TestDrainBuffer(unittest.IsolatedAsyncioTestCase):
+    """Test the drain_buffer method."""
+
+    async def test_drain_buffer_exists(self):
+        """GuestConnection should have a drain_buffer method."""
+        conn = GuestConnection(make_mock_guest(), 0)
+        self.assertTrue(hasattr(conn, 'drain_buffer'))
+
+    async def test_drain_buffer_timeout(self):
+        """drain_buffer should handle timeout gracefully."""
+        conn = make_mock_connection()
+        # Mock reader that returns no data (times out)
+        conn.online_reader.read = AsyncMock(side_effect=asyncio.TimeoutError())
+        # Should not raise
+        await conn.drain_buffer("online", timeout=0.1)
+
+
+class TestLeaveTeamSafety(unittest.IsolatedAsyncioTestCase):
+    """Test improved leave_team with error guard."""
+
+    async def test_leave_team_handles_send_error(self):
+        """leave_team should not crash if send_packet fails."""
+        conn = make_mock_connection()
+        conn.send_packet = AsyncMock(side_effect=Exception("Connection lost"))
+        # Should not raise
+        await conn.leave_team()
+        self.assertFalse(conn.in_squad)
+        self.assertFalse(conn.in_match)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

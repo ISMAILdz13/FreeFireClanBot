@@ -779,8 +779,11 @@ class GuestConnection:
         return sent
 
     async def leave_team(self):
-        """Leave squad.
-        FIX: Uses self.account_uid instead of hardcoded 12480598706."""
+        """Leave squad safely.
+        FIX: Uses self.account_uid instead of hardcoded 12480598706.
+        Added: small delay before leave to avoid race condition with match end."""
+        # Small delay before leaving — server may still be processing match end
+        await asyncio.sleep(0.5)
         fields = {
             1: 7,
             2: {
@@ -790,12 +793,29 @@ class GuestConnection:
         proto_bytes = await CrEaTe_ProTo(fields)
         pkt_type = get_packet_type(self.region)
         packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
-        await self.send_packet(packet, channel="online")
+        try:
+            await self.send_packet(packet, channel="online")
+        except Exception as e:
+            print(f"  [G{self.index+1}] Leave send error (non-critical): {e}")
         await asyncio.sleep(LEAVE_DELAY)
         self.in_match = False
         self.in_squad = False
         self.squad_code = None
         self.team_code = None
+
+    async def drain_buffer(self, channel: str = "online", timeout: float = 1.0):
+        """Drain any pending data from the socket buffer.
+        Call this before sending match packets to avoid reading stale data."""
+        reader = self.online_reader if channel == "online" else self.chat_reader
+        try:
+            while True:
+                data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+                if not data:
+                    break
+        except asyncio.TimeoutError:
+            pass
+        except:
+            pass
 
     async def cleanup(self):
         """Close all TCP connections."""
@@ -818,6 +838,7 @@ class ClanGloryBot:
                  cycles: int = DEFAULT_CYCLES):
         self.solo_mode = False
         self.join_delay = 3.0
+        self.dry_run = False
         self.clan_id = clan_id
         self.region = region
         self.max_cycles = cycles
@@ -1091,6 +1112,18 @@ class ClanGloryBot:
         print(f"  >> Sent {total_packets} start-match packets total")
 
         # Read match data
+        # Drain stale data from buffers before reading match results
+        for conn in self.connections:
+            if conn.connected:
+                await conn.drain_buffer("online", 0.5)
+                await conn.drain_buffer("chat", 0.5)
+
+        # Drain stale data from buffers before reading match results
+        for conn in self.connections:
+            if conn.connected:
+                await conn.drain_buffer("online", 0.5)
+                await conn.drain_buffer("chat", 0.5)
+
         print(f"  >> Waiting {MATCH_WAIT}s for match completion...")
         for conn in self.connections:
             if not conn.connected:
@@ -1165,6 +1198,12 @@ class ClanGloryBot:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         total_packets = sum(r for r in results if isinstance(r, int))
         print(f"  >> Sent {total_packets} ready packets total")
+
+        # Drain stale data from buffers before reading match results
+        for conn in self.connections:
+            if conn.connected:
+                await conn.drain_buffer("online", 0.5)
+                await conn.drain_buffer("chat", 0.5)
 
         print(f"  >> Waiting {MATCH_WAIT}s for match completion...")
         for conn in self.connections:
@@ -1431,6 +1470,15 @@ class ClanGloryBot:
             print("  Setup FAILED")
             return
 
+        if getattr(self, 'dry_run', False):
+            print("\n  === DRY RUN COMPLETE ===")
+            print(f"  All {len(self.connections)} guests authenticated and connected.")
+            for conn in self.connections:
+                status = "connected" if conn.connected else "DISCONNECTED"
+                print(f"  [G{conn.index+1}] uid={conn.account_uid}, {status}")
+            await self.cleanup_connections()
+            return
+
         start_time = time.time()
 
         # Check initial clan glory
@@ -1461,6 +1509,15 @@ class ClanGloryBot:
             except Exception as e:
                 print(f"  Cycle error: {e}")
                 await asyncio.sleep(RECONNECT_DELAY)
+
+
+    async def cleanup_connections(self):
+        """Clean up all guest connections."""
+        for conn in self.connections:
+            try:
+                await conn.cleanup()
+            except:
+                pass
 
         elapsed = int(time.time() - start_time)
         print("\n" + "=" * 60)
@@ -1499,6 +1556,7 @@ def main():
     p.add_argument("--spam-duration", type=int, default=SPAM_DURATION, help="Start-match spam duration (seconds)")
     p.add_argument("--spam-delay", type=float, default=SPAM_DELAY, help="Delay between start packets")
     p.add_argument("--solo", action="store_true", default=False, help="Solo matchmaking (no squad, each bot independently)")
+    p.add_argument("--dry-run", action="store_true", default=False, help="Test auth+connection only, no cycles")
     p.add_argument("--join-delay", type=float, default=3.0, help="Delay between member joins (seconds)")
     args = p.parse_args()
 
@@ -1512,6 +1570,7 @@ def main():
         cycles=args.cycles,
     )
     bot.solo_mode = args.solo
+    bot.dry_run = args.dry_run
     bot.join_delay = getattr(args, "join_delay", 3.0)
 
     def stop_handler(sig, frame):
