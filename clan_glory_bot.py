@@ -816,6 +816,7 @@ class ClanGloryBot:
 
     def __init__(self, clan_id: int = DEFAULT_CLAN_ID, region: str = DEFAULT_REGION,
                  cycles: int = DEFAULT_CYCLES):
+        self.solo_mode = False
         self.clan_id = clan_id
         self.region = region
         self.max_cycles = cycles
