@@ -805,10 +805,8 @@ class GuestConnection:
             fields = {1: 4, 2: {1: 1, 2: int(numeric_part)}}
             proto_hex = (await CrEaTe_ProTo(fields)).hex()
             simple_packet = await GeneRaTePk(proto_hex, '0515', self.key, self.iv)
-            # Send on BOTH channels — level bot uses whisper/chat for join
+            # TCP bot sends join on ONLINE channel
             await self.send_packet(simple_packet, channel="online")
-            await asyncio.sleep(0.2)
-            await self.send_packet(simple_packet, channel="chat")
             await asyncio.sleep(PACKET_INTERVAL)
             self.in_squad = True
             print(f"  [G{self.index+1}] Join packet sent (0515, code={numeric_part}, both channels)")
@@ -825,14 +823,14 @@ class GuestConnection:
 
     async def spam_start_match(self, duration: float, delay: float):
         """Spam start-match packets on the ONLINE socket for the given duration.
-        Uses TCP bot's field 1=214 (Clash Squad start match) — NOT field 1=9 (BR match).
+        Uses level bot's EXACT format: field 1=9 (BR match start), field 2={1: 12480598706}.
         """
         import time as _time
-        # TCP bot's create_simple_start_packet: field 1=214 (0xD6)
+        # Level bot's start_match: {1: 9, 2: {1: 12480598706}} — THIS WORKS
         fields = {
-            1: 214,
+            1: 9,
             2: {
-                1: 1,  # Start match command
+                1: 12480598706,
             }
         }
         proto_bytes = await CrEaTe_ProTo(fields)
@@ -842,9 +840,16 @@ class GuestConnection:
         end_time = _time.time() + duration
         sent = 0
         while _time.time() < end_time and self.connected:
-            await self.send_packet(packet, channel="online")
-            sent += 1
+            try:
+                await self.send_packet(packet, channel="online")
+                sent += 1
+            except Exception as e:
+                print(f"  [G{self.index+1}] Send failed at packet {sent}: {e}")
+                self.connected = False
+                break
             await asyncio.sleep(delay)
+        if not self.connected:
+            print(f"  [G{self.index+1}] Connection lost during spam (sent {sent} packets)")
         self.in_match = True
         return sent
 
@@ -859,7 +864,7 @@ class GuestConnection:
         proto_bytes = await CrEaTe_ProTo(fields)
         pkt_type = get_packet_type(self.region if hasattr(self, 'region') else "ME")
         packet = await GeneRaTePk(proto_bytes.hex(), pkt_type, self.key, self.iv)
-        await self.send_packet(packet, channel="whisper")
+        await self.send_packet(packet, channel="online")
         await asyncio.sleep(LEAVE_DELAY)
         self.in_match = False
         self.in_squad = False
