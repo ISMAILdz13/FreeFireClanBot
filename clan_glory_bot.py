@@ -824,6 +824,45 @@ class ClanGloryBot:
         self.cycle_count = 0
         self.total_glory_estimated = 0
 
+    async def check_clan_glory(self, label: str = ""):
+        """Check clan glory via HTTP API."""
+        try:
+            conn = self.connections[0]
+            if not conn.jwt:
+                return None
+            headers = {
+                "Authorization": f"Bearer {conn.jwt}",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM-A145F Build/RP1A.200720.012)",
+                "ReleaseVersion": "OB54",
+                "X-Unity-Version": "2018.4.11f1",
+            }
+            import urllib.parse
+            clan_payload = urllib.parse.urlencode({"clan_id": str(self.clan_id)}).encode()
+            async with aiohttp.ClientSession() as session:
+                for endpoint in [f"{conn.server_url}/GetClanInfo",
+                                 "https://clientbp.common.ggbluefox.com/GetClanInfo",
+                                 f"{conn.server_url}/GetGuildInfo"]:
+                    try:
+                        async with session.post(endpoint, data=clan_payload, headers=headers,
+                                               ssl=False, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                            if r.status == 200:
+                                data = await r.read()
+                                resp_hex = data.hex()
+                                print(f"  [CLAN] {label}: {len(resp_hex)} hex from {endpoint.split('/')[-1]}")
+                                json_str = await DeCode_PackEt(resp_hex)
+                                if json_str:
+                                    parsed = json.loads(json_str)
+                                    for k, v in sorted(parsed.items())[:15]:
+                                        if isinstance(v, dict) and 'data' in v:
+                                            print(f"  [CLAN] {label}: field {k} = {str(v['data'])[:100]}")
+                                    return parsed
+                    except:
+                        continue
+        except Exception as e:
+            print(f"  [CLAN] Glory check error: {e}")
+        return None
+
     async def setup(self) -> bool:
         """Authenticate all guests, connect TCP, join clan."""
         if not os.path.exists(GUESTS_FILE):
@@ -1247,6 +1286,10 @@ class ClanGloryBot:
 
         start_time = time.time()
 
+        # Check initial clan glory
+        print("\n  === Clan Glory Check (Before) ===")
+        await self.check_clan_glory("BEFORE")
+
         while self.running and self.cycle_count < self.max_cycles:
             self.cycle_count += 1
             print(f"\n  --- CYCLE #{self.cycle_count}/{self.max_cycles} ---")
@@ -1277,6 +1320,10 @@ class ClanGloryBot:
         print(f"  Est glory: ~{self.total_glory_estimated}")
         print(f"  Guests: {len(self.connections)}")
         print(f"  Clan: {self.clan_id}")
+        # Check final clan glory
+        print("\n  === Clan Glory Check (After) ===")
+        await self.check_clan_glory("AFTER")
+
         print("=" * 60)
 
         for conn in self.connections:
