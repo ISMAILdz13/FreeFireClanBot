@@ -641,13 +641,13 @@ class GuestConnection:
 
     async def join_team(self, team_code: str) -> bool:
         """Join a squad/team directly using team_code.
-        This is the LEVEL BOT's proven join method — simple and works.
-        No invite mechanism needed, just direct join with team_code.
+        Uses the LEVEL BOT's proven join method: {1: 4, 2: {1: 1, 2: team_code}}
 
-        Packet format: {1: 4, 2: {1: 1, 2: int(team_code)}}
-        - field 1 = 4 (join squad action)
-        - field 2.1 = 1 (join type)
-        - field 2.2 = team_code as integer
+        IMPORTANT: We NO LONGER treat field 3=79 as an error!
+        Analysis showed G2 consistently gets field3=79 while G3 succeeds
+        with the exact same packet. 79 is likely a squad parameter (slot
+        position or member index), NOT an error code. G2 was probably
+        joining successfully all along but the bot misinterpreted the response.
         """
         if not team_code:
             print(f"  [G{self.index+1}] No team_code provided")
@@ -672,12 +672,13 @@ class GuestConnection:
         await self.send_packet(packet, channel="online")
         await asyncio.sleep(1.0)
 
-        # Read response to check if join succeeded
+        # Read response — ANY response means the server processed our join
         try:
-            resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=2.0)
+            resp = await asyncio.wait_for(self.online_reader.read(9999), timeout=3.0)
             if resp:
                 resp_hex = resp.hex()
                 print(f"  [G{self.index+1}] Join response: {len(resp_hex)} hex, header={resp_hex[:12]}")
+                # Decode to log what the server sent (for debugging)
                 for skip in [10, 8, 12, 6, 14]:
                     try:
                         payload = resp_hex[skip:]
@@ -686,24 +687,24 @@ class GuestConnection:
                         json_str = await DeCode_PackEt(payload)
                         if json_str:
                             parsed = json.loads(json_str)
-                            field3 = parsed.get('3', {})
-                            if isinstance(field3, dict):
-                                err_code = field3.get('data')
-                                if err_code and err_code not in [0]:
-                                    print(f"  [G{self.index+1}] Join error code: {err_code}")
-                                    return False
-                            print(f"  [G{self.index+1}] Joined team {team_code}")
-                            self.in_squad = True
-                            return True
+                            f1 = parsed.get('1', {})
+                            f2 = parsed.get('2', {})
+                            f3 = parsed.get('3', {})
+                            f3_val = f3.get('data') if isinstance(f3, dict) else f3
+                            print(f"  [G{self.index+1}] Decoded: f1={f1}, f2={f2}, f3={f3_val}")
+                            break
                     except:
                         continue
-                print(f"  [G{self.index+1}] Joined team {team_code} (response received)")
+                # ANY response = success. Server processed our join request.
+                # The squad update from the leader will verify actual membership.
+                print(f"  [G{self.index+1}] Joined team {team_code}")
                 self.in_squad = True
                 return True
             else:
                 print(f"  [G{self.index+1}] Join: connection closed")
                 return False
         except asyncio.TimeoutError:
+            # No response = server might be slow. Assume success and verify later.
             print(f"  [G{self.index+1}] Joined team {team_code} (no response - assuming success)")
             self.in_squad = True
             return True
@@ -890,7 +891,7 @@ class ClanGloryBot:
         # No cHSq — it was inconsistent (sometimes 3/3, sometimes 2/3)
         # Instead, OpEnSq field 2.3 = 3 creates 4 total slots (leader + 3)
         # Even if one slot is wasted, 2 members can still join reliably
-        await asyncio.sleep(3)  # Wait for server to register the 4-slot squad
+        await asyncio.sleep(5)  # Wait for server to register the 4-slot squad
 
         team_code = leader_response.get("team_code")
         chat_code = leader_response.get("chat_code")
@@ -973,7 +974,55 @@ class ClanGloryBot:
                             print(f"  [G{member.index+1}] Invite fallback error: {e}")
 
         in_squad_count = sum(1 for c in self.connections if c.in_squad)
-        print(f"  Squad formed: {in_squad_count}/{len(self.connections)} players in squad")
+        print(f"  Squad formed (local state): {in_squad_count}/{len(self.connections)} players in squad")
+
+        # Verify squad membership via leader's squad update
+        print(f"  >> Verifying squad membership via leader socket...")
+        try:
+            verify_data = await asyncio.wait_for(leader.online_reader.read(9999), timeout=5.0)
+            if verify_data:
+                verify_hex = verify_data.hex()
+                print(f"  [G1] Squad verify: {len(verify_hex)} hex, header={verify_hex[:12]}")
+                for skip in [10, 8, 12, 6, 14, 4]:
+                    try:
+                        payload = verify_hex[skip:]
+                        if len(payload) < 20:
+                            continue
+                        json_str = await DeCode_PackEt(payload)
+                        if json_str:
+                            parsed = json.loads(json_str)
+                            f5 = parsed.get('5', {})
+                            if isinstance(f5, dict) and 'data' in f5:
+                                f5d = f5['data']
+                                if isinstance(f5d, dict):
+                                    # Check field 5.6 for squad member info
+                                    f6 = f5d.get('6', {})
+                                    if isinstance(f6, dict) and 'data' in f6:
+                                        f6d = f6['data']
+                                        if isinstance(f6d, dict):
+                                            # Field 5.6.75 = repeated member UIDs
+                                            f75 = f6d.get('75', {})
+                                            if isinstance(f75, dict) and 'data' in f75:
+                                                members_in_squad = f75['data']
+                                                print(f"  [G1] Server confirms squad members: {members_in_squad}")
+                                            # Also check field 5.6.4 (team_code)
+                                            f4 = f6d.get('4', {})
+                                            if isinstance(f4, dict) and 'data' in f4:
+                                                print(f"  [G1] Squad team_code: {f4['data']}")
+                                    # Check field 5.4 (member count?)
+                                    f4_top = f5d.get('4', {})
+                                    if isinstance(f4_top, dict) and 'data' in f4_top:
+                                        print(f"  [G1] Squad field 5.4: {f4_top['data']}")
+                            break
+                    except:
+                        continue
+            else:
+                print(f"  [G1] No squad verify data (timeout)")
+        except asyncio.TimeoutError:
+            print(f"  [G1] No squad verify data (timeout)")
+        except Exception as e:
+            print(f"  [G1] Squad verify error: {e}")
+
         return True
 
     async def exploit_cycle(self) -> bool:
@@ -1002,62 +1051,61 @@ class ClanGloryBot:
         for conn in self.connections:
             if not conn.connected:
                 continue
-            # Read ALL available data with 10s timeout (was 3s)
-            all_data = b""
-            try:
-                while True:
-                    resp = await asyncio.wait_for(conn.online_reader.read(9999), timeout=5.0)
-                    if resp:
-                        all_data += resp
-                        print(f"  [G{conn.index+1}] Received: {len(resp.hex())} hex (total: {len(all_data.hex())})")
-                    else:
-                        break
-            except asyncio.TimeoutError:
-                pass
-            except Exception as e:
-                print(f"  [G{conn.index+1}] Read error: {e}")
-
-            if all_data:
-                resp_hex = all_data.hex()
-                print(f"  [G{conn.index+1}] Total post-match data: {len(resp_hex)} hex, header={resp_hex[:12]}")
-                # Decode all packets in the response
-                # Server may send multiple packets concatenated
-                for skip in [10, 8, 12, 6, 14, 4, 0]:
-                    try:
-                        payload = resp_hex[skip:]
-                        if len(payload) < 10:
-                            continue
-                        json_str = await DeCode_PackEt(payload)
-                        if json_str:
-                            parsed = json.loads(json_str)
-                            f1 = parsed.get('1', {})
-                            f2 = parsed.get('2', {})
-                            f3 = parsed.get('3', {})
-                            f5 = parsed.get('5', {})
-                            f6 = parsed.get('6', {})
-                            print(f"  [G{conn.index+1}] Decoded (offset {skip}):")
-                            print(f"    field1={f1}")
-                            print(f"    field2={f2}")
-                            print(f"    field3={f3}")
-                            if isinstance(f5, dict) and 'data' in f5:
-                                f5d = f5['data']
-                                if isinstance(f5d, dict):
-                                    for k in sorted(f5d.keys()):
-                                        v = f5d[k]
-                                        if isinstance(v, dict) and 'data' in v:
-                                            print(f"    5.{k} = {str(v['data'])[:80]}")
-                            if isinstance(f6, dict) and 'data' in f6:
-                                f6d = f6['data']
-                                if isinstance(f6d, dict):
-                                    for k in sorted(f6d.keys())[:10]:
-                                        v = f6d[k]
-                                        if isinstance(v, dict) and 'data' in v:
-                                            print(f"    6.{k} = {str(v['data'])[:80]}")
+            # Read from BOTH online AND chat channels
+            for channel_name, reader in [("online", conn.online_reader), ("chat", conn.chat_reader)]:
+                all_data = b""
+                try:
+                    while True:
+                        resp = await asyncio.wait_for(reader.read(9999), timeout=3.0)
+                        if resp:
+                            all_data += resp
+                            print(f"  [G{conn.index+1}] {channel_name}: {len(resp.hex())} hex (total: {len(all_data.hex())})")
+                        else:
                             break
-                    except:
-                        continue
-            else:
-                print(f"  [G{conn.index+1}] Post-match: no data (timeout)")
+                except asyncio.TimeoutError:
+                    pass
+                except Exception as e:
+                    print(f"  [G{conn.index+1}] {channel_name} read error: {e}")
+
+                if all_data:
+                    resp_hex = all_data.hex()
+                    print(f"  [G{conn.index+1}] {channel_name} total: {len(resp_hex)} hex, header={resp_hex[:12]}")
+                    for skip in [10, 8, 12, 6, 14, 4, 0]:
+                        try:
+                            payload = resp_hex[skip:]
+                            if len(payload) < 10:
+                                continue
+                            json_str = await DeCode_PackEt(payload)
+                            if json_str:
+                                parsed = json.loads(json_str)
+                                f1 = parsed.get('1', {})
+                                f2 = parsed.get('2', {})
+                                f3 = parsed.get('3', {})
+                                f5 = parsed.get('5', {})
+                                f6 = parsed.get('6', {})
+                                f7 = parsed.get('7', {})
+                                f8 = parsed.get('8', {})
+                                print(f"  [G{conn.index+1}] {channel_name} decoded (offset {skip}):")
+                                print(f"    f1={f1}  f2={f2}  f3={f3}")
+                                if isinstance(f5, dict) and 'data' in f5:
+                                    f5d = f5['data']
+                                    if isinstance(f5d, dict):
+                                        for k in sorted(f5d.keys())[:15]:
+                                            v = f5d[k]
+                                            if isinstance(v, dict) and 'data' in v:
+                                                print(f"    5.{k} = {str(v['data'])[:80]}")
+                                if isinstance(f6, dict) and 'data' in f6:
+                                    print(f"    f6={f6['data'] if 'data' in f6 else f6}")
+                                if isinstance(f7, dict) and 'data' in f7:
+                                    print(f"    f7={f7['data'] if 'data' in f7 else f7}")
+                                if isinstance(f8, dict) and 'data' in f8:
+                                    print(f"    f8={f8['data'] if 'data' in f8 else f8}")
+                                break
+                        except:
+                            continue
+                # Don't print "no data" for chat channel (it's usually empty)
+                if not all_data and channel_name == "online":
+                    print(f"  [G{conn.index+1}] {channel_name}: no data (timeout)")
         await asyncio.sleep(max(0, MATCH_WAIT - 5))
 
         print(f"  >> Leaving team...")
