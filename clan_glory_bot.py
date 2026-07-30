@@ -810,12 +810,12 @@ class GuestConnection:
                 2: {
                     1: group_id,
                     2: "",
-                    8: {"1": "IDC3", "2": 149, "3": "IND"},
+                    8: {1: "IDC3", 2: 149, 3: "IND"},
                     10: 1,
                     13: 1,
                     14: 1,
                     16: "en",
-                    22: {"1": 21},
+                    22: {1: 21},
                 }
             }
             proto_bytes = await CrEaTe_ProTo(fields)
