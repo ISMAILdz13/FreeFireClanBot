@@ -1066,6 +1066,83 @@ class ClanGloryBot:
 
         return True
 
+    async def solo_cycle(self) -> bool:
+        """Solo matchmaking cycle: each bot independently starts matchmaking.
+        No squad formation — each bot finds its own match.
+        Solo has a larger player pool → more likely to actually start a match.
+        """
+        print(f"  >> SOLO MODE: Each bot independently matchmaking...")
+
+        # Each bot sends start-match independently
+        for conn in self.connections:
+            if conn.connected:
+                await conn.start_match_leader()
+                await asyncio.sleep(0.5)
+
+        # All bots spam start-match
+        print(f"  >> Spamming start-match for {SPAM_DURATION}s...")
+        tasks = []
+        for conn in self.connections:
+            if conn.connected:
+                tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        total_packets = sum(r for r in results if isinstance(r, int))
+        print(f"  >> Sent {total_packets} start-match packets total")
+
+        # Read match data
+        print(f"  >> Waiting {MATCH_WAIT}s for match completion...")
+        for conn in self.connections:
+            if not conn.connected:
+                continue
+            for channel_name, reader in [("online", conn.online_reader), ("chat", conn.chat_reader)]:
+                all_data = b""
+                try:
+                    while True:
+                        resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
+                        if resp:
+                            all_data += resp
+                        else:
+                            break
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    pass
+                if not all_data:
+                    continue
+                resp_hex = all_data.hex()
+                print(f"  [G{conn.index+1}] {channel_name}: {len(resp_hex)} hex, header={resp_hex[:16]}")
+                for skip in range(0, min(32, len(resp_hex)), 2):
+                    try:
+                        payload = resp_hex[skip:]
+                        if len(payload) < 20:
+                            continue
+                        json_str = await DeCode_PackEt(payload)
+                        if not json_str:
+                            continue
+                        parsed = json.loads(json_str)
+                        f2 = parsed.get('2', {})
+                        f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                        if not isinstance(f2_val, int) or f2_val < 1:
+                            continue
+                        f1 = parsed.get('1', {})
+                        f1_val = f1.get('data') if isinstance(f1, dict) else f1
+                        f5 = parsed.get('5', {})
+                        f5_summary = ""
+                        if isinstance(f5, dict) and 'data' in f5:
+                            f5d = f5['data']
+                            if isinstance(f5d, dict):
+                                f5_summary = str({k: (v.get('data') if isinstance(v, dict) else v) for k, v in list(f5d.items())[:8]})[:150]
+                        print(f"  [G{conn.index+1}] {channel_name} f2={f2_val}, f1={f1_val}, f5={f5_summary}")
+                        break
+                    except:
+                        continue
+
+        await asyncio.sleep(max(0, MATCH_WAIT - 5))
+        glory_per_cycle = len(self.connections) * random.randint(5, 15)
+        self.total_glory_estimated += glory_per_cycle
+        print(f"  >> Cycle #{self.cycle_count} done (est +~{glory_per_cycle} glory, total ~{self.total_glory_estimated})")
+        return True
+
     async def exploit_cycle(self) -> bool:
         """Single glory cycle: form squad -> leader starts match -> members spam ready -> wait -> leave."""
         await self.form_squad()
@@ -1097,7 +1174,7 @@ class ClanGloryBot:
                 all_data = b""
                 try:
                     while True:
-                        resp = await asyncio.wait_for(reader.read(65535), timeout=10.0)
+                        resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
                         if resp:
                             all_data += resp
                             print(f"  [G{conn.index+1}] {channel_name}: {len(resp.hex())} hex (total: {len(all_data.hex())})")
@@ -1246,6 +1323,29 @@ class ClanGloryBot:
                         print(f"    f2={f2_val}: {len(entries)} packet(s)")
                         for e in entries[:2]:
                             print(f"      off={e['offset']}, f1={str(e['f1'])[:40]}, f5={e['f5']}")
+                    # Deep decode f2=30 (clan data) and f2=clan_id packets
+                    for f2_val, entries in packet_types_found.items():
+                        if f2_val == 30 or f2_val == self.clan_id:
+                            for e in entries[:1]:
+                                try:
+                                    payload = resp_hex[e['offset']:]
+                                    json_str = await DeCode_PackEt(payload)
+                                    if json_str:
+                                        parsed = json.loads(json_str)
+                                        print(f"  [G{conn.index+1}] DEEP DECODE f2={f2_val}:")
+                                        def deep_log(d, prefix=""):
+                                            if isinstance(d, dict):
+                                                for k in sorted(d.keys())[:15]:
+                                                    v = d[k]
+                                                    if isinstance(v, dict) and 'data' in v:
+                                                        vd = v['data']
+                                                        if isinstance(vd, dict):
+                                                            deep_log(vd, f"{prefix}{k}.")
+                                                        else:
+                                                            print(f"    {prefix}{k} = {vd}")
+                                        deep_log(parsed)
+                                except:
+                                    pass
 
                 # STRATEGY 3: If raw decode didn't find f2=18, search for '1012' pattern
                 # Protobuf: field 2 (varint) = 18 → bytes 10 12
@@ -1318,6 +1418,8 @@ class ClanGloryBot:
         print(f"  Clan: {self.clan_id}")
         print(f"  Region: {self.region}")
         print(f"  Max cycles: {self.max_cycles}")
+        if self.solo_mode:
+            print(f"  Mode: SOLO (independent matchmaking)")
         cycle_time = SPAM_DURATION + MATCH_WAIT + int(CYCLE_DELAY)
         print(f"  Per cycle: ~{cycle_time}s")
         print(f"  Est total time: ~{(self.max_cycles * cycle_time) // 60} min")
@@ -1391,6 +1493,7 @@ def main():
     p.add_argument("--match-wait", type=int, default=MATCH_WAIT, help="Matchmaking wait (seconds)")
     p.add_argument("--spam-duration", type=int, default=SPAM_DURATION, help="Start-match spam duration (seconds)")
     p.add_argument("--spam-delay", type=float, default=SPAM_DELAY, help="Delay between start packets")
+    p.add_argument("--solo", action="store_true", default=False, help="Solo matchmaking (no squad, each bot independently)")
     args = p.parse_args()
 
     SPAM_DURATION = args.spam_duration
@@ -1402,6 +1505,7 @@ def main():
         region=args.region,
         cycles=args.cycles,
     )
+    bot.solo_mode = args.solo
 
     def stop_handler(sig, frame):
         bot.running = False
