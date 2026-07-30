@@ -780,7 +780,7 @@ class GuestConnection:
 
         # Method 1: Level bot simple format — {1: 4, 2: {1: 1, 2: int(code)}}
         try:
-            from byte import CrEaTe_ProTo, GeneRaTePk
+            from xC4 import CrEaTe_ProTo, GeneRaTePk
             fields = {1: 4, 2: {1: 1, 2: int(numeric_part)}}
             proto_hex = (await CrEaTe_ProTo(fields)).hex()
             simple_packet = await GeneRaTePk(proto_hex, '0515', self.key, self.iv)
