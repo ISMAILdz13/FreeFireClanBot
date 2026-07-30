@@ -1056,7 +1056,7 @@ class ClanGloryBot:
                 all_data = b""
                 try:
                     while True:
-                        resp = await asyncio.wait_for(reader.read(9999), timeout=3.0)
+                        resp = await asyncio.wait_for(reader.read(65535), timeout=3.0)
                         if resp:
                             all_data += resp
                             print(f"  [G{conn.index+1}] {channel_name}: {len(resp.hex())} hex (total: {len(all_data.hex())})")
@@ -1067,45 +1067,114 @@ class ClanGloryBot:
                 except Exception as e:
                     print(f"  [G{conn.index+1}] {channel_name} read error: {e}")
 
-                if all_data:
-                    resp_hex = all_data.hex()
-                    print(f"  [G{conn.index+1}] {channel_name} total: {len(resp_hex)} hex, header={resp_hex[:12]}")
-                    for skip in [10, 8, 12, 6, 14, 4, 0]:
-                        try:
-                            payload = resp_hex[skip:]
-                            if len(payload) < 10:
-                                continue
-                            json_str = await DeCode_PackEt(payload)
+                if not all_data:
+                    if channel_name == "online":
+                        print(f"  [G{conn.index+1}] {channel_name}: no data (timeout)")
+                    continue
+
+                resp_hex = all_data.hex()
+                print(f"  [G{conn.index+1}] {channel_name} total: {len(resp_hex)} hex, header={resp_hex[:16]}")
+
+                # STRATEGY 1: Try DEc_PacKeT (decryption) first, then decode
+                print(f"  [G{conn.index+1}] {channel_name}: trying DEc_PacKeT (decrypt) + DeCode_PackEt...")
+                for skip in range(0, min(24, len(resp_hex)), 2):
+                    try:
+                        payload = resp_hex[skip:]
+                        if len(payload) < 20:
+                            continue
+                        decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
+                        if decrypted:
+                            json_str = await DeCode_PackEt(decrypted)
                             if json_str:
                                 parsed = json.loads(json_str)
-                                f1 = parsed.get('1', {})
                                 f2 = parsed.get('2', {})
-                                f3 = parsed.get('3', {})
-                                f5 = parsed.get('5', {})
-                                f6 = parsed.get('6', {})
-                                f7 = parsed.get('7', {})
-                                f8 = parsed.get('8', {})
-                                print(f"  [G{conn.index+1}] {channel_name} decoded (offset {skip}):")
-                                print(f"    f1={f1}  f2={f2}  f3={f3}")
-                                if isinstance(f5, dict) and 'data' in f5:
-                                    f5d = f5['data']
-                                    if isinstance(f5d, dict):
-                                        for k in sorted(f5d.keys())[:15]:
-                                            v = f5d[k]
-                                            if isinstance(v, dict) and 'data' in v:
-                                                print(f"    5.{k} = {str(v['data'])[:80]}")
-                                if isinstance(f6, dict) and 'data' in f6:
-                                    print(f"    f6={f6['data'] if 'data' in f6 else f6}")
-                                if isinstance(f7, dict) and 'data' in f7:
-                                    print(f"    f7={f7['data'] if 'data' in f7 else f7}")
-                                if isinstance(f8, dict) and 'data' in f8:
-                                    print(f"    f8={f8['data'] if 'data' in f8 else f8}")
-                                break
-                        except:
+                                f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                                # Only log if we find meaningful data (f2 exists)
+                                if f2_val or '5' in parsed:
+                                    print(f"  [G{conn.index+1}] {channel_name} DECRYPTED (offset {skip}):")
+                                    for k in sorted(parsed.keys()):
+                                        v = parsed[k]
+                                        if isinstance(v, dict) and 'data' in v:
+                                            print(f"    {k} = {str(v['data'])[:100]}")
+                                        elif isinstance(v, dict) and isinstance(v.get('data'), dict):
+                                            for kk in sorted(v['data'].keys())[:10]:
+                                                vv = v['data'][kk]
+                                                if isinstance(vv, dict) and 'data' in vv:
+                                                    print(f"    {k}.{kk} = {str(vv['data'])[:80]}")
+                                    break
+                    except:
+                        continue
+
+                # STRATEGY 2: Try raw DeCode_PackEt at all offsets
+                print(f"  [G{conn.index+1}] {channel_name}: trying raw DeCode_PackEt at offsets 0-20...")
+                for skip in range(0, min(22, len(resp_hex)), 2):
+                    try:
+                        payload = resp_hex[skip:]
+                        if len(payload) < 20:
                             continue
-                # Don't print "no data" for chat channel (it's usually empty)
-                if not all_data and channel_name == "online":
-                    print(f"  [G{conn.index+1}] {channel_name}: no data (timeout)")
+                        json_str = await DeCode_PackEt(payload)
+                        if not json_str:
+                            continue
+                        parsed = json.loads(json_str)
+                        f2 = parsed.get('2', {})
+                        f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                        # Only log if f2 has a value (meaningful decode)
+                        if f2_val is not None:
+                            print(f"  [G{conn.index+1}] {channel_name} RAW (offset {skip}): f2={f2_val}")
+                            f5 = parsed.get('5', {})
+                            if isinstance(f5, dict) and 'data' in f5:
+                                f5d = f5['data']
+                                if isinstance(f5d, dict):
+                                    for k in sorted(f5d.keys())[:15]:
+                                        v = f5d[k]
+                                        if isinstance(v, dict) and 'data' in v:
+                                            print(f"    5.{k} = {str(v['data'])[:80]}")
+                            f6 = parsed.get('6', {})
+                            if isinstance(f6, dict) and 'data' in f6:
+                                f6d = f6['data']
+                                if isinstance(f6d, dict):
+                                    for k in sorted(f6d.keys())[:10]:
+                                        v = f6d[k]
+                                        if isinstance(v, dict) and 'data' in v:
+                                            print(f"    6.{k} = {str(v['data'])[:80]}")
+                            break
+                    except:
+                        continue
+
+                # STRATEGY 3: Search for known packet type headers in raw hex
+                for ptype in ['0500', '0514', '0515', '0519', '051a', '051b', '051c', '051d']:
+                    idx = resp_hex.find(ptype)
+                    if idx >= 0 and idx < 100:
+                        print(f"  [G{conn.index+1}] {channel_name}: found packet type {ptype} at hex offset {idx}")
+                        # Try to decode from that position
+                        for skip in [idx + 10, idx + 8, idx + 12, idx + 6]:
+                            try:
+                                payload = resp_hex[skip:]
+                                if len(payload) < 20:
+                                    continue
+                                # Try both raw and decrypted
+                                for label, data in [("raw", payload), ("dec", None)]:
+                                    if label == "dec":
+                                        data = await DEc_PacKeT(payload, conn.key, conn.iv)
+                                        if not data:
+                                            continue
+                                    json_str = await DeCode_PackEt(data)
+                                    if json_str:
+                                        parsed = json.loads(json_str)
+                                        f2 = parsed.get('2', {})
+                                        f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                                        print(f"  [G{conn.index+1}] {channel_name} @{ptype}+{skip-idx} ({label}): f2={f2_val}")
+                                        f5 = parsed.get('5', {})
+                                        if isinstance(f5, dict) and 'data' in f5:
+                                            f5d = f5['data']
+                                            if isinstance(f5d, dict):
+                                                for k in sorted(f5d.keys())[:10]:
+                                                    v = f5d[k]
+                                                    if isinstance(v, dict) and 'data' in v:
+                                                        print(f"    5.{k} = {str(v['data'])[:60]}")
+                                        break
+                            except:
+                                continue
         await asyncio.sleep(max(0, MATCH_WAIT - 5))
 
         print(f"  >> Leaving team...")
