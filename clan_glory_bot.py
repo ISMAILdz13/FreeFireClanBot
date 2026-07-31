@@ -70,8 +70,8 @@ AES_IV  = bytes([54, 111, 121, 90, 68, 114, 50, 50, 69, 51, 121, 99, 104, 106, 7
 DEFAULT_CLAN_ID    = 3100938923
 DEFAULT_REGION     = "ME"
 DEFAULT_CYCLES     = 200
-SPAM_DURATION      = 18
-SPAM_DELAY         = 0.2
+SPAM_DURATION      = 15
+SPAM_DELAY         = 1.0
 MATCH_WAIT         = 60
 LEAVE_DELAY        = 2.0
 CYCLE_DELAY        = 3.0
@@ -758,14 +758,7 @@ class GuestConnection:
         print(f"  [G{self.index+1}] LEADER start (field=269, detailed) sent!")
         await asyncio.sleep(0.5)
 
-        # 2. Simple start (field 1=214)
-        fields_simple = {1: 214, 2: {1: 1}}
-        pkt_simple = await GeneRaTePk((await CrEaTe_ProTo(fields_simple)).hex(), pkt_type, self.key, self.iv)
-        await self.send_packet(pkt_simple, channel="online")
-        print(f"  [G{self.index+1}] LEADER start (field=214, simple) sent!")
-        await asyncio.sleep(0.3)
-
-        # 3. Basic start (field 1=9)
+        # 2. Basic start (field 1=9)
         fields_basic = {1: 9, 2: {1: self.account_uid}}
         pkt_basic = await GeneRaTePk((await CrEaTe_ProTo(fields_basic)).hex(), pkt_type, self.key, self.iv)
         await self.send_packet(pkt_basic, channel="online")
@@ -787,7 +780,8 @@ class GuestConnection:
         end_time = time.time() + duration
         sent = 0
         while time.time() < end_time and self.connected:
-            ok = await self.send_packet(packet, channel="online")
+            ch = "online" if sent % 2 == 0 else "chat"
+            ok = await self.send_packet(packet, channel=ch)
             if ok:
                 sent += 1
             else:
@@ -795,7 +789,8 @@ class GuestConnection:
                     print(f"  [G{self.index+1}] Send failed at packet {sent} (connection dead)")
                     self.connected = False
                 break
-            await asyncio.sleep(delay)
+            jitter = random.uniform(delay * 0.8, delay * 1.5)
+            await asyncio.sleep(jitter)
         if not self.connected:
             print(f"  [G{self.index+1}] Connection lost during spam (sent {sent} packets)")
         self.in_match = True
@@ -1302,16 +1297,36 @@ class ClanGloryBot:
                             sent += 1
                         except:
                             pass
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(3.0)
             return sent
         
         keepalive_task = keepalive_solo(self.connections, deadline)
-        all_tasks = spam_tasks + read_tasks + [keepalive_task]
+        
+        async def mid_cycle_reconnect_solo(conns, deadline, clan_id):
+            reconnected = 0
+            while asyncio.get_event_loop().time() < deadline:
+                for conn in conns:
+                    if not conn.connected and not conn.match_found:
+                        try:
+                            await conn.connect_tcp()
+                            if conn.connected:
+                                await conn.join_clan(clan_id)
+                                reconnected += 1
+                                print(f"  [G{conn.index+1}] Mid-cycle reconnect OK")
+                        except:
+                            pass
+                await asyncio.sleep(10)
+            return reconnected
+        
+        reconnect_task = mid_cycle_reconnect_solo(self.connections, deadline, self.clan_id)
+        
+        all_tasks = spam_tasks + read_tasks + [keepalive_task, reconnect_task]
         results = await asyncio.gather(*all_tasks, return_exceptions=True)
         fast_packets = sum(r for r in results[:len(spam_tasks)] if isinstance(r, int))
-        keepalive_count = results[-1] if isinstance(results[-1], int) else 0
+        keepalive_count = results[-2] if isinstance(results[-2], int) else 0
+        reconnect_count = results[-1] if isinstance(results[-1], int) else 0
         total_packets = fast_packets + keepalive_count
-        print(f"  >> Sent {total_packets} start-match packets total ({fast_packets} fast + {keepalive_count} keepalive)")
+        print(f"  >> Sent {total_packets} start-match packets total ({fast_packets} fast + {keepalive_count} keepalive, {reconnect_count} reconnects)")
         
         # Share GroupID
         match_finders = [c for c in self.connections if c.match_found and c.match_data]
@@ -1348,7 +1363,7 @@ class ClanGloryBot:
         # LEADER sends the actual start-match packet (field 1=269, detailed)
         leader = self.connections[0]
         if leader.connected:
-            print(f"  >> LEADER starting match (3 packet types: 269+214+9)...")
+            print(f"  >> LEADER starting match (2 packet types: 269+9)...")
             await leader.start_match_leader()
             await asyncio.sleep(1)
 
@@ -1463,7 +1478,7 @@ class ClanGloryBot:
                             sent += 1
                         except:
                             pass
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(3.0)
             return sent
         
         # Read tasks (all connections × all channels, running for full duration)
@@ -1477,15 +1492,35 @@ class ClanGloryBot:
         # Keepalive task
         keepalive_task = keepalive_spam(self.connections, deadline)
         
-        # Run spam + keepalive + reads concurrently
-        all_tasks = spam_tasks + read_tasks + [keepalive_task]
+        # Mid-cycle reconnection: check every 10s for dead connections and try to reconnect
+        async def mid_cycle_reconnect(conns, deadline, clan_id):
+            reconnected = 0
+            while asyncio.get_event_loop().time() < deadline:
+                for conn in conns:
+                    if not conn.connected and not conn.match_found:
+                        try:
+                            await conn.connect_tcp()
+                            if conn.connected:
+                                await conn.join_clan(clan_id)
+                                reconnected += 1
+                                print(f"  [G{conn.index+1}] Mid-cycle reconnect OK")
+                        except:
+                            pass
+                await asyncio.sleep(10)
+            return reconnected
+        
+        reconnect_task = mid_cycle_reconnect(self.connections, deadline, self.clan_id)
+        
+        # Run spam + keepalive + reads + reconnect concurrently
+        all_tasks = spam_tasks + read_tasks + [keepalive_task, reconnect_task]
         results = await asyncio.gather(*all_tasks, return_exceptions=True)
         
         # Count spam packets (fast + keepalive)
         fast_packets = sum(r for r in results[:len(spam_tasks)] if isinstance(r, int))
-        keepalive_count = results[-1] if isinstance(results[-1], int) else 0
+        keepalive_count = results[-2] if isinstance(results[-2], int) else 0
+        reconnect_count = results[-1] if isinstance(results[-1], int) else 0
         total_packets = fast_packets + keepalive_count
-        print(f"  >> Sent {total_packets} packets total ({fast_packets} fast + {keepalive_count} keepalive)")
+        print(f"  >> Sent {total_packets} packets total ({fast_packets} fast + {keepalive_count} keepalive, {reconnect_count} reconnects)")
         
         # Share GroupID: if any connection found a match, make ALL connections join
         match_finders = [c for c in self.connections if c.match_found and c.match_data]
@@ -1582,7 +1617,8 @@ class ClanGloryBot:
                             await conn.connect_tcp()
                             if conn.connected:
                                 await conn.join_clan(self.clan_id)
-                                await asyncio.sleep(2)
+                                await asyncio.sleep(1)
+                                print(f"  [G{conn.index+1}] Reconnected OK")
                         except Exception as e:
                             print(f"  [G{conn.index+1}] Reconnect failed: {e}")
 

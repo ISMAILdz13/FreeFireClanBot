@@ -289,11 +289,11 @@ class TestMatchWaitTiming(unittest.TestCase):
         self.assertIn("MATCH_WAIT         = 60", source)
 
     def test_spam_duration_constant(self):
-        """SPAM_DURATION should be 18 seconds."""
+        """SPAM_DURATION should be 15 seconds."""
         bot_path = os.path.join(os.path.dirname(__file__), '..', 'clan_glory_bot.py')
         with open(bot_path) as f:
             source = f.read()
-        self.assertIn("SPAM_DURATION      = 18", source)
+        self.assertIn("SPAM_DURATION      = 15", source)
 
     def test_concurrent_reading_in_source(self):
         """Source should use asyncio.gather for concurrent reading."""

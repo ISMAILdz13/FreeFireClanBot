@@ -392,11 +392,11 @@ class TestBotConfigurationConstants(unittest.TestCase):
         self.assertIn("MATCH_WAIT         = 60", source)
 
     def test_spam_duration_is_18(self):
-        """SPAM_DURATION should be 18 seconds."""
+        """SPAM_DURATION should be 15 seconds."""
         bot_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'clan_glory_bot.py')
         with open(bot_path) as f:
             source = f.read()
-        self.assertIn("SPAM_DURATION      = 18", source)
+        self.assertIn("SPAM_DURATION      = 15", source)
 
     def test_join_match_method_exists(self):
         """join_match method should exist in the source."""
@@ -538,3 +538,42 @@ class TestConnectionMatchState(unittest.TestCase):
         result = await conn.read_channel_for_match("online", 1.0)
         self.assertIsNone(result)
         self.assertFalse(conn.connected)
+
+    # ── SPAM AGGRESSION FIXES ──────────────────────────
+
+    async def test_spam_alternates_channels(self):
+        """FIX 19: spam_start_match should alternate between online and chat."""
+        conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
+        conn.connected = True
+        conn.account_uid = 12345
+        conn.key = AES_KEY
+        conn.iv = AES_IV
+        conn.region = "ME"
+        channels_sent = []
+        async def mock_send(pkt, channel="online"):
+            channels_sent.append(channel)
+            return True
+        conn.send_packet = mock_send
+        await conn.spam_start_match(duration=0.5, delay=0.1)
+        # Should have sent on both channels
+        self.assertIn("online", channels_sent)
+        self.assertIn("chat", channels_sent)
+
+    async def test_spam_has_jitter(self):
+        """FIX 18: spam delay should have randomization (not constant)."""
+        import inspect
+        source = inspect.getsource(GuestConnection.spam_start_match)
+        self.assertIn("random.uniform", source, "spam_start_match should use random.uniform for jitter")
+
+    async def test_no_redundant_214_start_match(self):
+        """FIX 21: start_match_leader should not send field=214."""
+        import inspect
+        source = inspect.getsource(GuestConnection.start_match_leader)
+        self.assertNotIn("214", source, "start_match_leader should not send field 214")
+
+    async def test_mid_cycle_reconnect_exists(self):
+        """FIX 25: exploit_cycle should have mid-cycle reconnection."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("mid_cycle_reconnect", source, "exploit_cycle should have mid_cycle_reconnect")
+        self.assertIn("connect_tcp", source, "mid_cycle_reconnect should call connect_tcp")
