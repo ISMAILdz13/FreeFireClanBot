@@ -427,13 +427,22 @@ class GuestConnection:
             return False
 
     async def send_packet(self, packet: bytes, channel: str = "online"):
-        """Send a raw TCP packet."""
+        """Send a raw TCP packet. Returns True on success, False if connection dead."""
         writer = self.online_writer if channel == "online" else self.chat_writer
-        if writer and not writer.is_closing():
+        if not writer or writer.is_closing():
+            if self.connected:
+                self.connected = False
+                print(f"  [G{self.index+1}] {channel} writer closed (send_packet)")
+            return False
+        try:
             writer.write(packet)
             await writer.drain()
             return True
-        return False
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            if self.connected:
+                self.connected = False
+                print(f"  [G{self.index+1}] {channel} send error: {e}")
+            return False
 
     async def send_global_auth(self):
         """Send AutH_GlobAl packet — required after TCP connect."""
@@ -778,12 +787,13 @@ class GuestConnection:
         end_time = time.time() + duration
         sent = 0
         while time.time() < end_time and self.connected:
-            try:
-                await self.send_packet(packet, channel="online")
+            ok = await self.send_packet(packet, channel="online")
+            if ok:
                 sent += 1
-            except Exception as e:
-                print(f"  [G{self.index+1}] Send failed at packet {sent}: {e}")
-                self.connected = False
+            else:
+                if self.connected:
+                    print(f"  [G{self.index+1}] Send failed at packet {sent} (connection dead)")
+                    self.connected = False
                 break
             await asyncio.sleep(delay)
         if not self.connected:
@@ -810,8 +820,10 @@ class GuestConnection:
                 2: {
                     1: group_id,
                     2: "",
-                    8: {1: "IDC3", 2: 149, 3: "IND"},
+                    8: {1: "IDC3", 2: 149, 3: self.region.upper()},
+                    9: b"\x01\x03\x04\x07\x09\x0a\x0b\x12\x0e\x16\x19\x20\x1d",
                     10: 1,
+                    12: {},
                     13: 1,
                     14: 1,
                     16: "en",
@@ -1001,6 +1013,12 @@ class ClanGloryBot:
 
         print(f"  Squad: Leader=G1({leader.account_uid}) -> {len(members)} members (size={squad_size})")
 
+        # Reset per-cycle state
+        for conn in self.connections:
+            conn.match_found = False
+            conn.match_data = None
+            conn.in_match = False
+
         # Step 1: ALL members reset/leave existing squad
         print(f"  >> Resetting all members to solo...")
         for conn in self.connections:
@@ -1182,23 +1200,13 @@ class ClanGloryBot:
         """
         print(f"  >> SOLO MODE: Each bot independently matchmaking...")
 
-        # Each bot sends start-match independently
+        # Each bot sends start-match independently (leader packets only)
         for conn in self.connections:
             if conn.connected:
                 await conn.start_match_leader()
                 await asyncio.sleep(0.5)
 
-        # All bots spam start-match
-        print(f"  >> Spamming start-match for {SPAM_DURATION}s...")
-        tasks = []
-        for conn in self.connections:
-            if conn.connected:
-                tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        total_packets = sum(r for r in results if isinstance(r, int))
-        print(f"  >> Sent {total_packets} start-match packets total")
-
-        # CONCURRENT SPAM + READ (same as exploit_cycle — no drain_buffer!)
+        # CONCURRENT SPAM + READ (no sequential spam — reading starts immediately)
         total_wait = SPAM_DURATION + MATCH_WAIT
         deadline = asyncio.get_event_loop().time() + total_wait
         
@@ -1211,7 +1219,9 @@ class ClanGloryBot:
                 try:
                     resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
                     if not resp:
-                        continue
+                        # Empty response = connection closed
+                        conn.connected = False
+                        break
                     resp_hex = resp.hex()
                     if len(resp_hex) > 40:
                         print(f"  [{label}] DATA: {len(resp_hex)} hex, header={resp_hex[:16]}")
@@ -1256,7 +1266,7 @@ class ClanGloryBot:
             if not conn.match_found:
                 print(f"  [{label}] no match packet found")
         
-        # Start spam + reads concurrently
+        # Start spam + reads concurrently + keepalive
         spam_tasks = []
         for conn in self.connections:
             if conn.connected:
@@ -1269,10 +1279,39 @@ class ClanGloryBot:
             read_tasks.append(read_solo_match(conn, "online", conn.online_reader, deadline))
             read_tasks.append(read_solo_match(conn, "chat", conn.chat_reader, deadline))
         
-        all_tasks = spam_tasks + read_tasks
+        # Keepalive task for solo mode
+        async def keepalive_solo(conns, deadline):
+            # Pre-build per-connection packets
+            conn_packets = {}
+            for conn in conns:
+                if not conn.connected:
+                    continue
+                fields = {1: 9, 2: {1: conn.account_uid}}
+                proto = await CrEaTe_ProTo(fields)
+                pkt_type = get_packet_type(self.region)
+                conn_packets[conn.index] = await GeneRaTePk(proto.hex(), pkt_type, conn.key, conn.iv)
+            sent = 0
+            while asyncio.get_event_loop().time() < deadline:
+                for conn in conns:
+                    if not conn.connected or conn.match_found:
+                        continue
+                    pkt = conn_packets.get(conn.index)
+                    if pkt:
+                        try:
+                            await conn.send_packet(pkt, channel="online")
+                            sent += 1
+                        except:
+                            pass
+                await asyncio.sleep(2.0)
+            return sent
+        
+        keepalive_task = keepalive_solo(self.connections, deadline)
+        all_tasks = spam_tasks + read_tasks + [keepalive_task]
         results = await asyncio.gather(*all_tasks, return_exceptions=True)
-        total_packets = sum(r for r in results[:len(spam_tasks)] if isinstance(r, int))
-        print(f"  >> Sent {total_packets} start-match packets total")
+        fast_packets = sum(r for r in results[:len(spam_tasks)] if isinstance(r, int))
+        keepalive_count = results[-1] if isinstance(results[-1], int) else 0
+        total_packets = fast_packets + keepalive_count
+        print(f"  >> Sent {total_packets} start-match packets total ({fast_packets} fast + {keepalive_count} keepalive)")
         
         # Share GroupID
         match_finders = [c for c in self.connections if c.match_found and c.match_data]
@@ -1327,7 +1366,9 @@ class ClanGloryBot:
                 try:
                     resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
                     if not resp:
-                        continue
+                        # Empty response = connection closed
+                        conn.connected = False
+                        break
                     resp_hex = resp.hex()
                     # Only log if it's substantial data (skip tiny keepalive packets)
                     if len(resp_hex) > 40:
@@ -1382,19 +1423,48 @@ class ClanGloryBot:
                     continue
                 except Exception as e:
                     print(f"  [{label}] read error: {e}")
+                    conn.connected = False
                     break
             
             if not conn.match_found:
                 print(f"  [{label}] no match packet found")
         
         # Start spam AND concurrent reading at the same time
-        print(f"  >> Spamming ready packets (field 1=9) for {SPAM_DURATION}s + reading {MATCH_WAIT}s...")
+        print(f"  >> Spamming ready packets (field 1=9) for {SPAM_DURATION}s + keepalive for {MATCH_WAIT}s...")
         
-        # Spam tasks (all members spam start-match)
+        # Spam tasks: fast burst (18s) + slow keepalive (60s)
         spam_tasks = []
         for conn in self.connections:
             if conn.connected:
                 spam_tasks.append(conn.spam_start_match(SPAM_DURATION, SPAM_DELAY))
+        
+        # Keepalive task: send start-match packets at 2s intervals for the remaining 60s
+        async def keepalive_spam(conns, deadline):
+            """Send keepalive start-match packets at 2s intervals to keep connections alive."""
+            # Pre-build keepalive packets for each connection (they have different keys/IVs/UIDs)
+            conn_packets = {}
+            for conn in conns:
+                if not conn.connected:
+                    continue
+                fields = {1: 9, 2: {1: conn.account_uid}}
+                proto = await CrEaTe_ProTo(fields)
+                pkt_type = get_packet_type(self.region)
+                conn_packets[conn.index] = await GeneRaTePk(proto.hex(), pkt_type, conn.key, conn.iv)
+            
+            sent = 0
+            while asyncio.get_event_loop().time() < deadline:
+                for conn in conns:
+                    if not conn.connected or conn.match_found:
+                        continue
+                    pkt = conn_packets.get(conn.index)
+                    if pkt:
+                        try:
+                            await conn.send_packet(pkt, channel="online")
+                            sent += 1
+                        except:
+                            pass
+                await asyncio.sleep(2.0)
+            return sent
         
         # Read tasks (all connections × all channels, running for full duration)
         read_tasks = []
@@ -1404,13 +1474,18 @@ class ClanGloryBot:
             read_tasks.append(read_channel_for_match(conn, "online", conn.online_reader, deadline))
             read_tasks.append(read_channel_for_match(conn, "chat", conn.chat_reader, deadline))
         
-        # Run spam and reads concurrently
-        all_tasks = spam_tasks + read_tasks
+        # Keepalive task
+        keepalive_task = keepalive_spam(self.connections, deadline)
+        
+        # Run spam + keepalive + reads concurrently
+        all_tasks = spam_tasks + read_tasks + [keepalive_task]
         results = await asyncio.gather(*all_tasks, return_exceptions=True)
         
-        # Count spam packets
-        total_packets = sum(r for r in results[:len(spam_tasks)] if isinstance(r, int))
-        print(f"  >> Sent {total_packets} ready packets total")
+        # Count spam packets (fast + keepalive)
+        fast_packets = sum(r for r in results[:len(spam_tasks)] if isinstance(r, int))
+        keepalive_count = results[-1] if isinstance(results[-1], int) else 0
+        total_packets = fast_packets + keepalive_count
+        print(f"  >> Sent {total_packets} packets total ({fast_packets} fast + {keepalive_count} keepalive)")
         
         # Share GroupID: if any connection found a match, make ALL connections join
         match_finders = [c for c in self.connections if c.match_found and c.match_data]
@@ -1455,6 +1530,7 @@ class ClanGloryBot:
         for c in self.connections:
             c.match_found = False
             c.match_data = None
+            c.in_match = False
         return True
 
     async def run(self):
@@ -1502,15 +1578,20 @@ class ClanGloryBot:
                 for conn in self.connections:
                     if not conn.connected:
                         print(f"  [G{conn.index+1}] Reconnecting...")
-                        await conn.connect_tcp()
-                        await conn.join_clan(self.clan_id)
-                        await asyncio.sleep(2)
+                        try:
+                            await conn.connect_tcp()
+                            if conn.connected:
+                                await conn.join_clan(self.clan_id)
+                                await asyncio.sleep(2)
+                        except Exception as e:
+                            print(f"  [G{conn.index+1}] Reconnect failed: {e}")
 
                 if self.solo_mode:
                     await self.solo_cycle()
+                    await asyncio.sleep(CYCLE_DELAY)
                 else:
                     await self.exploit_cycle()
-                await asyncio.sleep(CYCLE_DELAY)
+                    # exploit_cycle already includes CYCLE_DELAY at its end
 
             except KeyboardInterrupt:
                 print("\n  Stopped by user")
@@ -1544,9 +1625,6 @@ class ClanGloryBot:
         await self.check_clan_glory("AFTER")
 
         print("=" * 60)
-
-        for conn in self.connections:
-            await conn.cleanup()
 
         try:
             with open(GUESTS_FILE, "w") as f:

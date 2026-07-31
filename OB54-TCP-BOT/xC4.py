@@ -32,7 +32,8 @@ async def EnC_Uid(H , Tp):
     return bytes(e).hex() if Tp == 'Uid' else None
 
 async def EnC_Vr(N):
-    if N < 0: ''
+    if N < 0:
+        return b""
     H = []
     while True:
         BesTo = N & 0x7F ; N >>= 7
@@ -478,7 +479,13 @@ async def GeneRaTePk(Pk , N , K , V):
     elif len(_) == 3: HeadEr = N + "00000"
     elif len(_) == 4: HeadEr = N + "0000"
     elif len(_) == 5: HeadEr = N + "000"
-    else: print('ErroR => GeneRatinG ThE PacKeT !! ')
+    elif len(_) == 6: HeadEr = N + "00"
+    elif len(_) == 7: HeadEr = N + "0"
+    elif len(_) == 8: HeadEr = N
+    elif len(_) == 1: HeadEr = N + "0000000"
+    else:
+        print(f'ErroR => GeneRatinG ThE PacKeT len={len(_)} !! ')
+        HeadEr = N + "000000"
     return bytes.fromhex(HeadEr + _ + PkEnc)
 async def OpEnSq(K , V,region):
     fields = {1: 1, 2: {2: "\u0001", 3: 1, 4: 1, 5: "en", 9: 1, 11: 1, 13: 1, 14: {2: 5756, 6: 11, 8: "1.126.2", 9: 2, 10: 4}}}

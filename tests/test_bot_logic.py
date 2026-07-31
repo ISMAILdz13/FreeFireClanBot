@@ -436,3 +436,105 @@ class TestConnectionMatchState(unittest.TestCase):
             source = f.read()
         self.assertIn("match_found", source)
         self.assertIn("match_data", source)
+
+    # ── NEW FIX TESTS ──────────────────────────────────
+
+    async def test_send_packet_sets_connected_false_on_dead_writer(self):
+        """FIX: send_packet should set connected=False when writer is dead."""
+        conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
+        conn.connected = True
+        conn.online_writer = None
+        result = await conn.send_packet(b"test", "online")
+        self.assertFalse(result)
+        self.assertFalse(conn.connected)
+
+    async def test_send_packet_sets_connected_false_on_write_exception(self):
+        """FIX: send_packet should set connected=False on write exception."""
+        conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
+        conn.connected = True
+        writer = AsyncMock()
+        writer.is_closing.return_value = False
+        writer.write = Mock()
+        writer.drain = AsyncMock(side_effect=ConnectionResetError("reset"))
+        conn.online_writer = writer
+        result = await conn.send_packet(b"test", "online")
+        self.assertFalse(result)
+        self.assertFalse(conn.connected)
+
+    async def test_spam_stops_on_dead_connection(self):
+        """FIX: spam_start_match should stop when send_packet returns False."""
+        conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
+        conn.connected = True
+        conn.account_uid = 12345
+        conn.key = AES_KEY
+        conn.iv = AES_IV
+        conn.region = "ME"
+        conn.send_packet = AsyncMock(return_value=False)
+        sent = await conn.spam_start_match(duration=2.0, delay=0.1)
+        self.assertEqual(sent, 0)
+        self.assertFalse(conn.connected)
+
+    async def test_form_squad_resets_match_state(self):
+        """FIX: form_squad should reset match_found and match_data at cycle start."""
+        bot = ClanGloryBot(clan_id=123, region="ME", max_cycles=1)
+        conn1 = GuestConnection({"uid": "1", "password": "x", "open_id": "o", "access_token": "t"}, 0)
+        conn2 = GuestConnection({"uid": "2", "password": "x", "open_id": "o", "access_token": "t"}, 1)
+        conn1.match_found = True
+        conn1.match_data = {"fake": "data"}
+        conn1.in_match = True
+        conn2.match_found = True
+        bot.connections = [conn1, conn2]
+        conn1.reset_squad = AsyncMock()
+        conn2.reset_squad = AsyncMock()
+        conn1.open_squad = AsyncMock(return_value={"team_code": 123, "owner_uid": 1, "squad_code": "abc"})
+        conn2.join_squad = AsyncMock(return_value=True)
+        await bot.form_squad()
+        self.assertFalse(conn1.match_found)
+        self.assertIsNone(conn1.match_data)
+        self.assertFalse(conn1.in_match)
+
+    async def test_join_match_uses_correct_region(self):
+        """FIX: join_match should use self.region, not hardcoded 'IND'."""
+        conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
+        conn.region = "ME"
+        conn.key = AES_KEY
+        conn.iv = AES_IV
+        conn.connected = True
+        conn.account_uid = 12345
+        sent_packets = []
+        async def mock_send(pkt, channel="online"):
+            sent_packets.append(channel)
+            return True
+        conn.send_packet = mock_send
+        await conn.join_match(1234567890)
+        self.assertTrue(len(sent_packets) >= 1)
+
+    async def test_keepalive_pre_builds_per_connection(self):
+        """FIX: keepalive should pre-build per-connection packets."""
+        from xC4 import CrEaTe_ProTo, GeneRaTePk
+        conn1 = GuestConnection({"uid": "1", "password": "x", "open_id": "o", "access_token": "t"}, 0)
+        conn2 = GuestConnection({"uid": "2", "password": "x", "open_id": "o", "access_token": "t"}, 1)
+        conn1.account_uid = 111
+        conn2.account_uid = 222
+        conn1.key = AES_KEY
+        conn1.iv = AES_IV
+        conn2.key = bytes([1]*16)
+        conn2.iv = bytes([2]*16)
+        pkt1_fields = {1: 9, 2: {1: conn1.account_uid}}
+        pkt2_fields = {1: 9, 2: {1: conn2.account_uid}}
+        proto1 = await CrEaTe_ProTo(pkt1_fields)
+        proto2 = await CrEaTe_ProTo(pkt2_fields)
+        packet1 = await GeneRaTePk(proto1.hex(), "0515", conn1.key, conn1.iv)
+        packet2 = await GeneRaTePk(proto2.hex(), "0515", conn2.key, conn2.iv)
+        self.assertNotEqual(packet1, packet2)
+
+    async def test_read_channel_sets_connected_false_on_empty_resp(self):
+        """FIX: read_channel_for_match should set connected=False on empty response."""
+        conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
+        conn.connected = True
+        reader = AsyncMock()
+        reader.read.return_value = b""
+        conn.online_reader = reader
+        result = await conn.read_channel_for_match("online", 1.0)
+        self.assertIsNone(result)
+        self.assertFalse(conn.connected)

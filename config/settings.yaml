@@ -1,8 +1,8 @@
-# Free Fire Like Bot Pro - Configuration
-# MENA Server Optimized
+# ClanGloryBot - Configuration
+# ME Server Optimized
 
 bot:
-  name: "FF-LikeBot-Pro"
+  name: "ClanGloryBot"
   version: "2.0.0"
   debug: false
   max_workers: 1
@@ -13,41 +13,34 @@ server:
   region_name: "MENA"
   game_version: "OB54"
   client_version: "1.126.2"
-  user_agent: "FreeFireMobile/1.104.1 (Android 13; SM-G998B)"
+  client_version_code: "2024010012"
+  user_agent: "Dalvik/2.1.0 (Linux; U; Android 11; SM-A145F Build/RP1A.200720.012)"
 
 encryption:
-  # PRIMARY KEYS - UPDATE THESE VIA FRIDA EXTRACTION
+  # PRIMARY KEYS - Extracted from OB54 client
   main_key: "Yg&tc%DEuh6%Zc^8"
   main_iv: "6oyZDr22E3ychjM%"
-  key_rotation: true
-  fallback_keys:
-    - key: "FreeFire2024Key!!"
-      iv: "InitVector2024!!"
-    - key: "GarenaFFME2024!!"
-      iv: "MENAServer2024!!"
+  key_rotation: false
+  fallback_keys: []
 
 rate_limiting:
   requests_per_second: 8
   burst_size: 15
   guest_cooldown_seconds: 5
-  target_daily_limit: 500
-  global_daily_limit: 50000
 
-streak:
-  default_count: 100
-  max_streak: 1000
-  delay_between_likes_ms: 10000
-  jitter_percent: 20
-
-proxies:
-  enabled: false
-  rotation_strategy: "round_robin"  # round_robin, random, least_used
-  proxy_file: "config/proxies.txt"
-  test_url: "https://httpbin.org/ip"
-  test_timeout: 10
+matchmaking:
+  spam_duration: 18
+  spam_delay: 0.2
+  match_wait: 60
+  leave_delay: 2.0
+  cycle_delay: 3.0
+  reconnect_delay: 3
+  packet_interval: 0.5
+  keepalive_interval: 2.0
+  max_ready_packets_per_spam: 300
 
 guests:
-  db_path: "data/guests.db"
+  file: "data/guests.json"
   batch_size: 100
   health_check_interval: 3600
   auto_remove_dead: true
@@ -55,7 +48,6 @@ guests:
 
 jwt:
   cache_enabled: true
-  cache_db: "data/jwt_cache.db"
   ttl_hours: 20
   refresh_before_expiry_minutes: 60
 
@@ -65,9 +57,3 @@ logging:
   max_size_mb: 50
   backup_count: 5
   format: "%(asctime)s | %(levelname)-8s | [%(name)s] %(message)s"
-
-dashboard:
-  enabled: false
-  host: "0.0.0.0"
-  port: 8080
-  auth_token: "change-me-in-production"
