@@ -577,3 +577,23 @@ class TestConnectionMatchState(unittest.TestCase):
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
         self.assertIn("mid_cycle_reconnect", source, "exploit_cycle should have mid_cycle_reconnect")
         self.assertIn("connect_tcp", source, "mid_cycle_reconnect should call connect_tcp")
+
+    # ── SQUAD PUBLIC + 4TH PLAYER WAIT ──────────────────
+
+    async def test_squad_opens_as_public(self):
+        """FIX 26: open_squad should use field 2.9 = 0 (public)."""
+        import inspect
+        source = inspect.getsource(GuestConnection.open_squad)
+        self.assertIn("9: 0", source, "open_squad should set field 2.9 = 0 (public)")
+
+    async def test_wait_for_squad_full_exists(self):
+        """FIX 27: ClanGloryBot should have wait_for_squad_full method."""
+        self.assertTrue(hasattr(ClanGloryBot, 'wait_for_squad_full'),
+                        "ClanGloryBot should have wait_for_squad_full method")
+
+    async def test_wait_for_squad_full_called_in_form_squad(self):
+        """FIX 27: form_squad should call wait_for_squad_full when squad < 4."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.form_squad)
+        self.assertIn("wait_for_squad_full", source,
+                        "form_squad should call wait_for_squad_full")

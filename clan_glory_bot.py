@@ -480,16 +480,17 @@ class GuestConnection:
 
     async def open_squad(self, region: str) -> dict:
         """OpEnSq — leader opens squad for matchmaking.
-        Creates 4 total slots (leader + 3) — Clash Squad is 4v4 standard."""
+        Creates 4 total slots (leader + 3) — Clash Squad is 4v4 standard.
+        Squad is OPEN/PUBLIC so random players can fill the 4th slot."""
         extra_slots = 3  # 3 extra slots = 4 total (Clash Squad 4v4 standard)
         fields = {
             1: 1,
             2: {
                 2: "\u0001",
-                3: extra_slots,  # 3 extra slots = 4 total (Clash Squad standard)
+                3: extra_slots,  # 3 extra slots = 4 total
                 4: 1,
                 5: "en",
-                9: 1,
+                9: 0,  # 0 = PUBLIC squad (random players can join 4th slot)
                 11: 1,
                 13: 1,
                 14: {2: 5756, 6: 11, 8: "1.126.2", 9: 2, 10: 4}
@@ -988,6 +989,84 @@ class ClanGloryBot:
         print(f"\n  {len(ready)} guests ready in clan {self.clan_id}")
         return len(ready) >= 1
 
+
+    async def wait_for_squad_full(self, leader, timeout: float = 30.0):
+        """Wait for the 4th player to join the squad.
+        Monitors leader's chat channel for squad member updates.
+        Returns True if 4/4 confirmed, False if timeout."""
+        print(f"  >> Waiting for 4th player to join squad (timeout {timeout}s)...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data = await asyncio.wait_for(leader.chat_reader.read(9999), timeout=5.0)
+                if not data:
+                    print(f"  [G1] Connection closed while waiting for 4th player")
+                    return False
+                data_hex = data.hex()
+                for skip in [10, 8, 12, 6, 14, 4, 0, 16, 18]:
+                    try:
+                        payload = data_hex[skip:]
+                        if len(payload) < 20:
+                            continue
+                        # Try decryption first
+                        try:
+                            decrypted = await DEc_PacKeT(payload, leader.key, leader.iv)
+                            if decrypted:
+                                json_str = await DeCode_PackEt(decrypted)
+                                if json_str:
+                                    parsed = json.loads(json_str)
+                                    f5 = parsed.get('5', {})
+                                    if isinstance(f5, dict) and 'data' in f5:
+                                        f5d = f5['data']
+                                        if isinstance(f5d, dict):
+                                            f6 = f5d.get('6', {})
+                                            if isinstance(f6, dict) and 'data' in f6:
+                                                f6d = f6['data']
+                                                if isinstance(f6d, dict):
+                                                    f75 = f6d.get('75', {})
+                                                    if isinstance(f75, dict) and 'data' in f75:
+                                                        mc = f75['data']
+                                                        print(f"  [G1] Squad members: {mc}/4")
+                                                        if int(mc) >= 4:
+                                                            print(f"  >> Squad FULL! 4/4 players ready.")
+                                                            return True
+                        except:
+                            pass
+                        # Try raw decode
+                        try:
+                            json_str = await DeCode_PackEt(payload)
+                            if json_str:
+                                parsed = json.loads(json_str)
+                                f5 = parsed.get('5', {})
+                                if isinstance(f5, dict) and 'data' in f5:
+                                    f5d = f5['data']
+                                    if isinstance(f5d, dict):
+                                        f6 = f5d.get('6', {})
+                                        if isinstance(f6, dict) and 'data' in f6:
+                                            f6d = f6['data']
+                                            if isinstance(f6d, dict):
+                                                f75 = f6d.get('75', {})
+                                                if isinstance(f75, dict) and 'data' in f75:
+                                                    mc = f75['data']
+                                                    print(f"  [G1] Squad members: {mc}/4")
+                                                    if int(mc) >= 4:
+                                                        print(f"  >> Squad FULL! 4/4 players ready.")
+                                                        return True
+                        except:
+                            pass
+                    except:
+                        continue
+            except asyncio.TimeoutError:
+                remaining = int(deadline - time.time())
+                if remaining > 0:
+                    print(f"  >> Still waiting for 4th player... ({remaining}s left)")
+            except Exception as e:
+                print(f"  [G1] Wait for 4th player error: {e}")
+                break
+        
+        print(f"  >> No 4th player joined within {timeout}s. Starting match anyway (3/4).")
+        return False
+
     async def form_squad(self) -> bool:
         """
         Squad formation (SIMPLIFIED - no invite mechanism):
@@ -1185,6 +1264,11 @@ class ClanGloryBot:
         
         if not verified:
             print(f"  [G1] Squad verify: no data on either channel (squad may still be valid)")
+
+        # Wait for 4th player if squad is not full (3/4)
+        in_squad_count = sum(1 for c in self.connections if c.in_squad)
+        if in_squad_count < 4 and leader.connected:
+            await self.wait_for_squad_full(leader, timeout=30.0)
 
         return True
 
