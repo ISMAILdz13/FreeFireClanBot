@@ -541,59 +541,56 @@ class TestConnectionMatchState(unittest.TestCase):
 
     # ── SPAM AGGRESSION FIXES ──────────────────────────
 
-    async def test_spam_alternates_channels(self):
-        """FIX 19: spam_start_match should alternate between online and chat."""
-        conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
-        conn.connected = True
-        conn.account_uid = 12345
-        conn.key = AES_KEY
-        conn.iv = AES_IV
-        conn.region = "ME"
-        channels_sent = []
-        async def mock_send(pkt, channel="online"):
-            channels_sent.append(channel)
-            return True
-        conn.send_packet = mock_send
-        await conn.spam_start_match(duration=0.5, delay=0.1)
-        # Should have sent on both channels
-        self.assertIn("online", channels_sent)
-        self.assertIn("chat", channels_sent)
 
-    async def test_spam_has_jitter(self):
-        """FIX 18: spam delay should have randomization (not constant)."""
-        import inspect
-        source = inspect.getsource(GuestConnection.spam_start_match)
-        self.assertIn("random.uniform", source, "spam_start_match should use random.uniform for jitter")
+    # ── NEW GLORY BOT LOGIC TESTS ──────────────────────
 
-    async def test_no_redundant_214_start_match(self):
-        """FIX 21: start_match_leader should not send field=214."""
-        import inspect
-        source = inspect.getsource(GuestConnection.start_match_leader)
-        self.assertNotIn("214", source, "start_match_leader should not send field 214")
-
-    async def test_mid_cycle_reconnect_exists(self):
-        """FIX 25: exploit_cycle should have mid-cycle reconnection."""
+    async def test_no_aggressive_spam_in_exploit_cycle(self):
+        """FIX 31: exploit_cycle should NOT use spam_start_match (kills connections)."""
         import inspect
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("mid_cycle_reconnect", source, "exploit_cycle should have mid_cycle_reconnect")
-        self.assertIn("connect_tcp", source, "mid_cycle_reconnect should call connect_tcp")
+        self.assertNotIn("spam_start_match", source,
+                         "exploit_cycle should not use spam_start_match")
+        self.assertNotIn("SPAM_DURATION", source,
+                         "exploit_cycle should not reference SPAM_DURATION")
 
-    # ── SQUAD PUBLIC + 4TH PLAYER WAIT ──────────────────
+    async def test_exploit_cycle_uses_single_start_match(self):
+        """FIX 31: Leader should send start_match_leader ONCE, not spam."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("start_match_leader", source,
+                      "Leader should call start_match_leader")
+        self.assertIn("Ready signal sent", source,
+                      "Members should send ready signal once")
 
-    async def test_squad_opens_as_public(self):
-        """FIX 26: open_squad should use field 2.9 = 0 (public)."""
+    async def test_exploit_cycle_has_slow_keepalive(self):
+        """FIX 31: Keepalive should be slow (3s) not aggressive spam."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("slow_keepalive", source,
+                      "exploit_cycle should use slow_keepalive")
+        self.assertIn("3.0", source,
+                      "Keepalive interval should be 3.0s")
+
+    async def test_exploit_cycle_monitors_both_channels(self):
+        """FIX 31: Should monitor both online and chat channels for match packet."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("online", source)
+        self.assertIn("chat", source)
+        self.assertIn("read_channel_for_match", source)
+
+    async def test_squad_size_is_3_not_4(self):
+        """FIX 30: Squad should open with 2 extra slots (3 total), not 4."""
         import inspect
         source = inspect.getsource(GuestConnection.open_squad)
-        self.assertIn("9: 0", source, "open_squad should set field 2.9 = 0 (public)")
+        self.assertIn("extra_slots = 2", source,
+                      "open_squad should use 2 extra slots (3 total)")
+        self.assertNotIn("extra_slots = 3", source,
+                         "open_squad should NOT use 3 extra slots (4 total)")
 
-    async def test_wait_for_squad_full_exists(self):
-        """FIX 27: ClanGloryBot should have wait_for_squad_full method."""
-        self.assertTrue(hasattr(ClanGloryBot, 'wait_for_squad_full'),
-                        "ClanGloryBot should have wait_for_squad_full method")
-
-    async def test_wait_for_squad_full_called_in_form_squad(self):
-        """FIX 27: form_squad should call wait_for_squad_full when squad < 4."""
+    async def test_no_wait_for_4th_player(self):
+        """FIX 29: form_squad should NOT wait for 4th player."""
         import inspect
         source = inspect.getsource(ClanGloryBot.form_squad)
-        self.assertIn("wait_for_squad_full", source,
-                        "form_squad should call wait_for_squad_full")
+        self.assertNotIn("wait_for_squad_full", source,
+                         "form_squad should not call wait_for_squad_full")
