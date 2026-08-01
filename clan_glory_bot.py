@@ -1354,7 +1354,7 @@ class ClanGloryBot:
                 if verify_data:
                     verify_hex = verify_data.hex()
                     print(f"  [G1] {ch_name} verify: {len(verify_hex)} hex, header={verify_hex[:12]}")
-                    for skip in [10, 8, 12, 6, 14, 4, 0, 16, 18]:
+                    for skip in range(0, min(30, len(verify_hex)//2)):
                         try:
                             payload = verify_hex[skip:]
                             if len(payload) < 20:
@@ -1689,7 +1689,7 @@ class ClanGloryBot:
                 pkt_type = get_packet_type(self.region)
                 spam_packets[conn.index] = await GeneRaTePk(proto.hex(), pkt_type, conn.key, conn.iv)
 
-        SPAM_DURATION = 17
+        SPAM_DURATION = 25
         SPAM_DELAY = 0.2
 
         # ── ALL members spam field 1=9 on ONLINE channel (17s) ──
@@ -1720,14 +1720,29 @@ class ClanGloryBot:
                         data_hex = data.hex()
                         if len(data_hex) > 100:
                             print(f"  [G{conn.index+1}/chat] DATA: {len(data_hex)} hex")
-                        for skip in [10, 8, 12, 6, 14, 4, 0, 16, 18]:
+                        for skip in range(0, min(30, len(data_hex)//2)):
                             try:
                                 payload = data_hex[skip:]
                                 if len(payload) < 20:
                                     continue
-                                json_str = await DeCode_PackEt(payload)
-                                if json_str:
-                                    parsed = json.loads(json_str)
+                                # Try decryption first
+                                parsed = None
+                                try:
+                                    decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
+                                    if decrypted:
+                                        json_str = await DeCode_PackEt(decrypted)
+                                        if json_str:
+                                            parsed = json.loads(json_str)
+                                except:
+                                    pass
+                                if not parsed:
+                                    try:
+                                        json_str = await DeCode_PackEt(payload)
+                                        if json_str:
+                                            parsed = json.loads(json_str)
+                                    except:
+                                        pass
+                                if parsed:
                                     f2 = parsed.get('2', {})
                                     f2_val = f2.get('data') if isinstance(f2, dict) else f2
                                     if isinstance(f2_val, int) and f2_val == 18:
@@ -1747,7 +1762,7 @@ class ClanGloryBot:
                                                                 c.match_found = True
                                                                 await asyncio.sleep(0.5)
                                                         break
-                                            break
+                                        break
                             except:
                                 continue
                     if match_found:
@@ -1767,7 +1782,7 @@ class ClanGloryBot:
         # ── Wait phase: actively read ALL channels for match-found packets ──
         # The real match packet (f2=18 with large GroupID) often arrives
         # AFTER the spam phase, during the wait period.
-        WAIT_DURATION = 40
+        WAIT_DURATION = 50
         print(f"  >> Waiting {WAIT_DURATION}s (reading all channels for match packets)...")
         wait_end = asyncio.get_event_loop().time() + WAIT_DURATION
         
@@ -1785,14 +1800,31 @@ class ClanGloryBot:
                         if len(data_hex) > 100:
                             print(f"  [G{conn.index+1}/{ch_name}] DATA: {len(data_hex)} hex")
                         # Try to parse for f2=18 match-found packet
-                        for skip in [10, 8, 12, 6, 14, 4, 0, 16, 18]:
+                        # Try ALL offsets 0-30 AND try decryption first (like old working code)
+                        for skip in range(0, min(30, len(data_hex)//2)):
                             try:
                                 payload = data_hex[skip:]
                                 if len(payload) < 20:
                                     continue
-                                json_str = await DeCode_PackEt(payload)
-                                if json_str:
-                                    parsed = json.loads(json_str)
+                                # Try decryption first (server may encrypt match packets)
+                                parsed = None
+                                try:
+                                    decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
+                                    if decrypted:
+                                        json_str = await DeCode_PackEt(decrypted)
+                                        if json_str:
+                                            parsed = json.loads(json_str)
+                                except:
+                                    pass
+                                # Try raw decode if decryption failed
+                                if not parsed:
+                                    try:
+                                        json_str = await DeCode_PackEt(payload)
+                                        if json_str:
+                                            parsed = json.loads(json_str)
+                                    except:
+                                        pass
+                                if parsed:
                                     f2 = parsed.get('2', {})
                                     f2_val = f2.get('data') if isinstance(f2, dict) else f2
                                     if isinstance(f2_val, int) and f2_val == 18:
@@ -1813,7 +1845,7 @@ class ClanGloryBot:
                                                                 await asyncio.sleep(0.5)
                                                         return  # match found, stop reading
                                                     # else: small GroupID = squad status, ignore
-                                    break
+                                        break
                             except:
                                 continue
                 except asyncio.TimeoutError:
