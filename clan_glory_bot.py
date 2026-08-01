@@ -1799,6 +1799,49 @@ class ClanGloryBot:
             await asyncio.sleep(40)
             alive_count = sum(1 for c in self.connections if c.connected)
             print(f"  >> After wait: {alive_count} alive")
+            # Read any remaining packets on all channels
+            for conn in self.connections:
+                if not conn.connected:
+                    continue
+                for reader, ch_name in [(conn.online_reader, "online"), (conn.chat_reader, "chat")]:
+                    try:
+                        data = await asyncio.wait_for(reader.read(9999), timeout=1.0)
+                        if data:
+                            data_hex = data.hex()
+                            print(f"  [G{conn.index+1}/{ch_name}] POST-MATCH DATA: {len(data_hex)} hex, raw={data_hex[:120]}")
+                            for skip in range(0, min(30, len(data_hex)//2)):
+                                try:
+                                    payload = data_hex[skip:]
+                                    if len(payload) < 20:
+                                        continue
+                                    parsed = None
+                                    try:
+                                        decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
+                                        if decrypted:
+                                            json_str = await DeCode_PackEt(decrypted)
+                                            if json_str:
+                                                parsed = json.loads(json_str)
+                                    except:
+                                        pass
+                                    if not parsed:
+                                        try:
+                                            json_str = await DeCode_PackEt(payload)
+                                            if json_str:
+                                                parsed = json.loads(json_str)
+                                        except:
+                                            pass
+                                    if parsed:
+                                        for dk in sorted(parsed.keys())[:8]:
+                                            dv = parsed[dk]
+                                            dvv = dv.get('data') if isinstance(dv, dict) else dv
+                                            print(f"    [post-match] f{dk}={str(dvv)[:150]}")
+                                        break
+                                except:
+                                    continue
+                    except asyncio.TimeoutError:
+                        pass
+                    except:
+                        pass
             # Leave squad
             for conn in self.connections:
                 if conn.connected:
@@ -1998,13 +2041,25 @@ class ClanGloryBot:
                                     f2_val = f2.get('data') if isinstance(f2, dict) else f2
                                     if isinstance(f2_val, int) and f2_val == 18:
                                         f5 = parsed.get('5', {})
-                                        # Print f1/f2 for all packets (not just f2=18)
-                                        if len(data_hex) < 1000:
-                                            f1_short = str(f1_val)[:60] if f1_val else '?'
-                                            print(f"    [debug] f1={f1_short}, f2={f2_val}, len={len(data_hex)}")
+                                        # DUMP ALL FIELDS of match-found packet
+                                        f1_raw = parsed.get('1', {})
+                                        f1_v = f1_raw.get('data') if isinstance(f1_raw, dict) else f1_raw
+                                        print(f"    [debug] MATCH PACKET f1={str(f1_v)[:60]}, f2={f2_val}, len={len(data_hex)}")
+                                        print(f"    [debug] raw hex (first 200): {data_hex[:200]}")
+                                        # Dump all top-level fields
+                                        for dk in sorted(parsed.keys())[:12]:
+                                            dv = parsed[dk]
+                                            dvv = dv.get('data') if isinstance(dv, dict) else dv
+                                            print(f"    [debug]   f{dk}={str(dvv)[:200]}")
+                                        # Dump field 5 sub-fields if present
                                         if isinstance(f5, dict) and 'data' in f5:
                                             f5d = f5['data']
                                             if isinstance(f5d, dict):
+                                                # Dump all field 5 sub-fields
+                                                for sk in sorted(f5d.keys())[:15]:
+                                                    sv = f5d[sk]
+                                                    svv = sv.get('data') if isinstance(sv, dict) else sv
+                                                    print(f"    [debug]   f5.{sk}={str(svv)[:200]}")
                                                 f51 = f5d.get('1', {})
                                                 if isinstance(f51, dict) and 'data' in f51:
                                                     gid = f51['data']
