@@ -2033,7 +2033,7 @@ class ClanGloryBot:
         # ── Wait phase: actively read ALL channels for match-found packets ──
         # The real match packet (f2=18 with large GroupID) often arrives
         # AFTER the spam phase, during the wait period.
-        WAIT_DURATION = 90
+        WAIT_DURATION = 120
         # Use a shared dict as mutable flag — avoids Python scoping issues
         # where match_found in nested functions becomes a local variable
         match_state = {"found": match_found, "gid": None}
@@ -2149,6 +2149,7 @@ class ClanGloryBot:
         # Also send periodic start-match packets during wait to keep squad in queue
         async def keep_queuing(deadline):
             """Send start-match packets every 5s during wait to stay in matchmaking queue."""
+            qcount = 0
             while asyncio.get_event_loop().time() < deadline:
                 if match_state["found"]:
                     return
@@ -2157,6 +2158,9 @@ class ClanGloryBot:
                         pkt = spam_packets.get(conn.index)
                         if pkt:
                             await conn.send_packet(pkt, channel="online")
+                qcount += 1
+                if qcount % 6 == 1:  # print every ~30s
+                    print(f"  >> Still queuing ({qcount * 5}s elapsed, {int(deadline - asyncio.get_event_loop().time())}s left)")
                 await asyncio.sleep(5.0)
         
         wait_tasks = []
