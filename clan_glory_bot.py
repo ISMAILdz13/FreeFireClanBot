@@ -971,6 +971,75 @@ class GuestConnection:
 
 # ======================== CLAN GLORY BOT ========================
 
+# ======================== CREDIT SCORE CHECK ========================
+
+async def check_credit_score(jwt_token: str, uid: str) -> dict:
+    """Check Credit/Honour Score via GetPlayerPersonalShow API.
+    
+    Returns dict with credit_score, status, and whether account can play CS.
+    Score < 90 = cannot play Clash Squad.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(BASE_DIR, 'OB54-TCP-BOT'))
+    sys.path.insert(0, os.path.join(BASE_DIR, 'OB54-TCP-BOT', 'Pb2'))
+    
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad
+    import google.protobuf.json_format as json_format
+    from Pb2 import dev_generator_pb2, data_pb2
+    
+    API_KEY = b'Yg&tc%DEuh6%Zc^8'
+    API_IV  = b'6oyZDr22E3ychjM%'
+    
+    def enc_uid(uid_str):
+        msg = dev_generator_pb2.dev_generator()
+        msg.saturn_ = int(uid_str)
+        msg.garena = 1
+        pb = msg.SerializeToString()
+        cipher = AES.new(API_KEY, AES.MODE_CBC, API_IV)
+        return cipher.encrypt(pad(pb, AES.block_size)).hex()
+    
+    url = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
+    encrypted_uid = enc_uid(uid)
+    edata = bytes.fromhex(encrypted_uid)
+    headers = {
+        **HTTP_HEADERS,
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=edata, headers=headers, ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                content = await resp.read()
+                info = data_pb2.AccountPersonalShowInfo()
+                info.ParseFromString(content)
+                d = json.loads(json_format.MessageToJson(info))
+                
+                basic = d.get('basicInfo', {})
+                credit = d.get('creditScoreInfo', {})
+                clan = d.get('clanBasicInfo', {})
+                
+                score = credit.get('score', 'N/A')
+                can_play_cs = True
+                if score != 'N/A':
+                    can_play_cs = int(score) >= 90
+                
+                return {
+                    'uid': uid,
+                    'nickname': basic.get('nickname', 'N/A'),
+                    'level': basic.get('level', 'N/A'),
+                    'credit_score': score,
+                    'credit_status': credit.get('status', 'N/A'),
+                    'can_play_cs': can_play_cs,
+                    'clan_name': clan.get('clanName', 'N/A'),
+                    'clan_level': clan.get('clanLevel', 'N/A'),
+                }
+    except Exception as e:
+        return {"error": str(e)}
+
 class ClanGloryBot:
     """Orchestrates the clan glory farming loop."""
 
@@ -1741,71 +1810,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-# ======================== CREDIT SCORE CHECK ========================
-
-async def check_credit_score(jwt_token: str, uid: str) -> dict:
-    """Check Credit/Honour Score via GetPlayerPersonalShow API.
-    
-    Returns dict with credit_score, status, and whether account can play CS.
-    Score < 90 = cannot play Clash Squad.
-    """
-    import sys
-    sys.path.insert(0, os.path.join(BASE_DIR, 'OB54-TCP-BOT'))
-    sys.path.insert(0, os.path.join(BASE_DIR, 'OB54-TCP-BOT', 'Pb2'))
-    
-    from Crypto.Cipher import AES
-    from Crypto.Util.Padding import pad
-    import google.protobuf.json_format as json_format
-    from Pb2 import dev_generator_pb2, data_pb2
-    
-    API_KEY = b'Yg&tc%DEuh6%Zc^8'
-    API_IV  = b'6oyZDr22E3ychjM%'
-    
-    def enc_uid(uid_str):
-        msg = dev_generator_pb2.dev_generator()
-        msg.saturn_ = int(uid_str)
-        msg.garena = 1
-        pb = msg.SerializeToString()
-        cipher = AES.new(API_KEY, AES.MODE_CBC, API_IV)
-        return cipher.encrypt(pad(pb, AES.block_size)).hex()
-    
-    url = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
-    encrypted_uid = enc_uid(uid)
-    edata = bytes.fromhex(encrypted_uid)
-    headers = {
-        **HTTP_HEADERS,
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=edata, headers=headers, ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    return {"error": f"HTTP {resp.status}"}
-                content = await resp.read()
-                info = data_pb2.AccountPersonalShowInfo()
-                info.ParseFromString(content)
-                d = json.loads(json_format.MessageToJson(info))
-                
-                basic = d.get('basicInfo', {})
-                credit = d.get('creditScoreInfo', {})
-                clan = d.get('clanBasicInfo', {})
-                
-                score = credit.get('score', 'N/A')
-                can_play_cs = True
-                if score != 'N/A':
-                    can_play_cs = int(score) >= 90
-                
-                return {
-                    'uid': uid,
-                    'nickname': basic.get('nickname', 'N/A'),
-                    'level': basic.get('level', 'N/A'),
-                    'credit_score': score,
-                    'credit_status': credit.get('status', 'N/A'),
-                    'can_play_cs': can_play_cs,
-                    'clan_name': clan.get('clanName', 'N/A'),
-                    'clan_level': clan.get('clanLevel', 'N/A'),
-                }
-    except Exception as e:
-        return {"error": str(e)}
