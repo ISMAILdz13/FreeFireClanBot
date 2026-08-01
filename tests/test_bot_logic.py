@@ -592,11 +592,6 @@ class TestConnectionMatchState(unittest.TestCase):
         self.assertIn("online", source, "Should send on online channel")
         self.assertIn("chat", source, "Should send on chat channel")
 
-    async def test_reset_ka_watchdog(self):
-        """reset_ka_watchdog should exist for when data is received."""
-        self.assertTrue(hasattr(GuestConnection, 'reset_ka_watchdog'),
-                        "Should have reset_ka_watchdog method")
-
     async def test_connect_tcp_sets_keepalive(self):
         """connect_tcp should start a background keepalive task."""
         import inspect
@@ -618,3 +613,30 @@ class TestConnectionMatchState(unittest.TestCase):
         import inspect
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
         self.assertNotIn("269", source, "Field 269 is a fake opcode — should not be used")
+
+
+    # ── WATCHDOG TESTS (TIMESTAMP-BASED) ──────────────────
+
+    async def test_watchdog_timestamp_based(self):
+        """Watchdog should use timestamp, not counter."""
+        import inspect
+        source = inspect.getsource(GuestConnection.keepalive_loop)
+        self.assertIn("_last_data_time", source, "Should use timestamp-based watchdog")
+        self.assertIn("120", source, "Should use 120s threshold")
+        self.assertNotIn("_ka_silent_count", source, "Should NOT use old counter")
+
+    async def test_drain_loop_exists(self):
+        """drain_loop should exist for background data reading."""
+        import inspect
+        self.assertTrue(hasattr(GuestConnection, 'drain_loop'),
+                        "Should have drain_loop method")
+        source = inspect.getsource(GuestConnection.drain_loop)
+        self.assertIn("reset_ka_watchdog", source, "Should reset watchdog on data")
+        self.assertIn("_drain_paused", source, "Should check pause flag")
+
+    async def test_drain_pause_in_exploit_cycle(self):
+        """exploit_cycle should pause/resume drain around read phase."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("_drain_paused = True", source, "Should pause drain before spam")
+        self.assertIn("_drain_paused = False", source, "Should resume drain after")

@@ -434,9 +434,11 @@ class GuestConnection:
             await self.send_global_auth()
 
             self.connected = True
-            self._ka_silent_count = 0  # watchdog: unanswered keepalives
+            self._last_data_time = time.time()  # timestamp-based watchdog
+            self._drain_paused = False  # exploit_cycle pauses drain to read match packets
             self._ka_stop = asyncio.Event()
             self._ka_task = asyncio.create_task(self.keepalive_loop(self._ka_stop))
+            self._drain_task = asyncio.create_task(self.drain_loop(self._ka_stop))
             print(f"  [G{self.index+1}] TCP OK (SO_KEEPALIVE + field-99 keepalive loop)")
             return True
         except Exception as e:
@@ -465,12 +467,8 @@ class GuestConnection:
     async def send_keepalive(self, channel="online"):
         """Send keep-alive packet (field 1=99) on the specified channel.
         
-        CRITICAL: Online channel uses 0515 header, Chat channel uses 1215 header.
-        The reference bot (OB54-TCP-BOT) had a bug where it sent 0515 on the chat
-        channel — this caused the chat server to drop the packet or disconnect.
-        
-        Interval: 15 seconds (not faster — triggers rate limiting at <5s).
-        Watchdog: force reconnect after 8 unanswered keepalives.
+        Online channel uses 0515 header, Chat channel uses 1215 header.
+        Interval: 15 seconds. Watchdog: 120s without any data = reconnect.
         """
         if not self.connected:
             return False
@@ -482,14 +480,7 @@ class GuestConnection:
             else:
                 pkt_type = get_packet_type(self.region)
                 pkt = await GeneRaTePk(proto.hex(), pkt_type, self.key, self.iv)
-            ok = await self.send_packet(pkt, channel=channel)
-            if ok:
-                self._ka_silent_count = getattr(self, '_ka_silent_count', 0) + 1
-                if self._ka_silent_count >= 8:
-                    print(f"  [G{self.index+1}] Watchdog: 8 unanswered keepalives, forcing reconnect")
-                    self.connected = False
-                    return False
-            return ok
+            return await self.send_packet(pkt, channel=channel)
         except Exception as e:
             if self.connected:
                 print(f"  [G{self.index+1}] Keepalive error: {e}")
@@ -498,19 +489,52 @@ class GuestConnection:
 
     def reset_ka_watchdog(self):
         """Call when any data is received from the server."""
-        self._ka_silent_count = 0
+        self._last_data_time = time.time()
 
     async def keepalive_loop(self, stop_event=None):
-        """Background keepalive loop: send field 99 every 15s on BOTH channels.
+        """Background keepalive: field 99 every 15s on BOTH channels.
         
-        This runs continuously while the connection is alive, not just during
-        exploit_cycle. Connections die during squad formation too if no
-        keepalive is sent.
+        Watchdog: if no data received for 120s (2 min), force reconnect.
+        This is a SAFETY NET, not the primary connection keeper.
         """
         while self.connected and (stop_event is None or not stop_event.is_set()):
             await self.send_keepalive(channel="online")
             await self.send_keepalive(channel="chat")
+            # Watchdog check: 120s without ANY data = dead connection
+            if time.time() - getattr(self, '_last_data_time', time.time()) > 120:
+                print(f"  [G{self.index+1}] Watchdog: no data for 120s, reconnecting")
+                self.connected = False
+                break
             await asyncio.sleep(15)
+
+    async def drain_loop(self, stop_event=None):
+        """Background data drain: continuously read from BOTH channels.
+        
+        Drains incoming data so sockets don't fill up, and resets the watchdog
+        whenever ANY data arrives. Paused during exploit_cycle's read phase
+        so it doesn't eat match packets.
+        """
+        while self.connected and (stop_event is None or not stop_event.is_set()):
+            if getattr(self, '_drain_paused', False):
+                await asyncio.sleep(0.5)
+                continue
+            for reader, name in [(self.online_reader, "online"), (self.chat_reader, "chat")]:
+                if not reader or not self.connected:
+                    continue
+                try:
+                    resp = await asyncio.wait_for(reader.read(65535), timeout=0.5)
+                    if resp:
+                        self.reset_ka_watchdog()
+                    elif resp is not None and len(resp) == 0:
+                        if self.connected:
+                            print(f"  [G{self.index+1}/{name}] drain: connection closed")
+                            self.connected = False
+                        break
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    continue
+            await asyncio.sleep(0.1)
 
     async def send_global_auth(self):
         """Send AutH_GlobAl packet — required after TCP connect."""
@@ -954,15 +978,17 @@ class GuestConnection:
 
     async def cleanup(self):
         """Close all TCP connections and stop keepalive loop."""
-        # Stop background keepalive loop
+        # Stop background loops
         if hasattr(self, '_ka_stop') and self._ka_stop:
             self._ka_stop.set()
-        if hasattr(self, '_ka_task') and self._ka_task:
-            self._ka_task.cancel()
-            try:
-                await asyncio.wait_for(self._ka_task, timeout=2)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
+        for task_attr in ['_ka_task', '_drain_task']:
+            task = getattr(self, task_attr, None)
+            if task:
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=2)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
         for writer in [self.online_writer, self.chat_writer]:
             if writer and not writer.is_closing():
                 try:
@@ -1543,6 +1569,10 @@ class ClanGloryBot:
         MATCH_WAIT = 80
         deadline = asyncio.get_event_loop().time() + SPAM_DURATION + MATCH_WAIT
 
+        # Pause background drain so it doesn't eat match packets
+        for conn in self.connections:
+            conn._drain_paused = True
+
         # ── PHASE 1: Spam field 1=9 on ONLINE channel (17s) ──
         print(f"  >> Spam field=9 on ONLINE ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
         async def spam_phase(conns, duration, delay):
@@ -1669,6 +1699,10 @@ class ClanGloryBot:
 
         matches = sum(1 for c in self.connections if c.match_found)
         print(f"  >> {matches} match(es), {alive_count} alive")
+
+        # Resume background drain
+        for conn in self.connections:
+            conn._drain_paused = False
 
         # Leave squad
         for conn in self.connections:
