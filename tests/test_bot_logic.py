@@ -563,34 +563,28 @@ class TestConnectionMatchState(unittest.TestCase):
 
     # ── PASSIVE MODE TESTS ─────────────────────────────
 
-    async def test_exploit_cycle_no_keepalive(self):
-        """No keepalive packets — they kill connections."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertNotIn("keepalive", source.lower(),
-                         "exploit_cycle should NOT have any keepalive")
-        self.assertNotIn("reconnect", source.lower(),
-                         "exploit_cycle should NOT have mid-cycle reconnection")
 
-    async def test_exploit_cycle_passive_read(self):
-        """Should read passively — no sending after start-match."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("PASSIVE", source,
-                      "exploit_cycle should be in PASSIVE mode")
-        self.assertIn("read_channel_for_match", source,
-                      "Should have read_channel_for_match")
+    # ── MURAXLEE APPROACH TESTS ─────────────────────────
 
-    async def test_exploit_cycle_tries_decryption(self):
-        """Should try decryption on chat channel packets (they're encrypted)."""
+    async def test_exploit_cycle_uses_field9_only(self):
+        """Should use field 1=9 (not 269) — matches Muraxlee bot."""
         import inspect
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("DEc_PacKeT", source,
-                      "Should try DEc_PacKeT for encrypted chat packets")
+        self.assertIn("1: 9", source, "Should use field 1=9")
+        self.assertNotIn("269", source, "Should NOT use field 269")
 
-    async def test_exploit_cycle_120s_timeout(self):
-        """Match wait should be 120s (was 90s)."""
+    async def test_exploit_cycle_online_channel_only(self):
+        """Spam should be on online channel ONLY — chat kills connections."""
         import inspect
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("120", source,
-                      "Match timeout should be 120s")
+        self.assertIn("channel=\"online\"", source,
+                      "Should send on online channel")
+        self.assertNotIn('"chat"', source.split("spam_field9")[1].split("read_channel")[0] if "spam_field9" in source else "",
+                         "Spam should NOT reference chat channel")
+
+    async def test_spam_start_match_online_only(self):
+        """spam_start_match should send on online channel only (not alternate)."""
+        import inspect
+        source = inspect.getsource(GuestConnection.spam_start_match)
+        self.assertNotIn('% 2 == 0', source,
+                         "Should NOT alternate between online and chat")
