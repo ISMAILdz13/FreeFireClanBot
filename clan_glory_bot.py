@@ -1888,10 +1888,17 @@ class ClanGloryBot:
                                     except:
                                         pass
                                 if parsed:
+                                    # Print ALL decoded packets for debugging
+                                    f1 = parsed.get('1', {})
+                                    f1_val = f1.get('data') if isinstance(f1, dict) else f1
                                     f2 = parsed.get('2', {})
                                     f2_val = f2.get('data') if isinstance(f2, dict) else f2
                                     if isinstance(f2_val, int) and f2_val == 18:
                                         f5 = parsed.get('5', {})
+                                        # Print f1/f2 for all packets (not just f2=18)
+                                        if len(data_hex) < 1000:
+                                            f1_short = str(f1_val)[:60] if f1_val else '?'
+                                            print(f"    [debug] f1={f1_short}, f2={f2_val}, len={len(data_hex)}")
                                         if isinstance(f5, dict) and 'data' in f5:
                                             f5d = f5['data']
                                             if isinstance(f5d, dict):
@@ -1981,6 +1988,10 @@ class ClanGloryBot:
                                     f2_val = f2.get('data') if isinstance(f2, dict) else f2
                                     if isinstance(f2_val, int) and f2_val == 18:
                                         f5 = parsed.get('5', {})
+                                        # Print f1/f2 for all packets (not just f2=18)
+                                        if len(data_hex) < 1000:
+                                            f1_short = str(f1_val)[:60] if f1_val else '?'
+                                            print(f"    [debug] f1={f1_short}, f2={f2_val}, len={len(data_hex)}")
                                         if isinstance(f5, dict) and 'data' in f5:
                                             f5d = f5['data']
                                             if isinstance(f5d, dict):
