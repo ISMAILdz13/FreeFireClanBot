@@ -59,12 +59,20 @@ from xC4 import (
     CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
     AuthClan, OpEnSq, AutH_GlobAl, ExiT,
     DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
-    # Note: DeCode_PackEt prints "error Invalid hex format" on failure.
-    # We call it hundreds of times at different offsets — most fail.
-    # Use _silent_decode below to suppress the noise.
     EnC_PacKeT, EnC_Uid, EnC_Vr, SEnd_InV,
     GenJoinSquadsPacket,
 )
+
+# Suppress xC4 "error Invalid hex format" spam (offset scanning tries
+# hundreds of invalid payloads; contextlib.redirect_stdout breaks async
+# parsing, so we filter at the print level instead)
+import builtins as _bi
+_orig_print = _bi.print
+def _filtered_print(*args, **kwargs):
+    if args and isinstance(args[0], str) and 'error Invalid' in args[0]:
+        return
+    return _orig_print(*args, **kwargs)
+_bi.print = _filtered_print
 
 # ======================== CONFIG ========================
 
@@ -1125,11 +1133,18 @@ class ClanGloryBot:
                     "https://clientbp.ggblueshark.com/GetClanInfoByClanID",
                 ]
 
+                import ssl as _ssl
+                _ssl_ctx = _ssl.create_default_context()
+                _ssl_ctx.check_hostname = False
+                _ssl_ctx.verify_mode = _ssl.CERT_NONE
+
                 for url in urls:
                     try:
+                        print(f"  [CLAN] {label}: trying {url}...")
                         req = urllib.request.Request(url, data=body, headers=headers, method='POST')
-                        with urllib.request.urlopen(req, timeout=10) as resp:
+                        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
                             raw = resp.read()
+                            print(f"  [CLAN] {label}: got {len(raw)} bytes from {url}")
                             if len(raw) > 0:
                                 # Decode raw protobuf
                                 def decode_proto(data):
@@ -1184,7 +1199,7 @@ class ClanGloryBot:
                                 print(f"  [CLAN] {label}: ALL fields: {pf}")
                                 break
                     except Exception as e:
-                        pass
+                        print(f"  [CLAN] {label}: {url} failed: {e}")
             except Exception as api_err:
                 print(f"  [CLAN] {label}: GetClanInfoByClanID error: {api_err}")
 
@@ -1280,7 +1295,7 @@ class ClanGloryBot:
                         try:
                             decrypted = await DEc_PacKeT(payload, leader.key, leader.iv)
                             if decrypted:
-                                json_str = await _silent_decode(decrypted)
+                                json_str = await DeCode_PackEt(decrypted)
                                 if json_str:
                                     parsed = json.loads(json_str)
                                     f5 = parsed.get('5', {})
@@ -1302,7 +1317,7 @@ class ClanGloryBot:
                             pass
                         # Try raw decode
                         try:
-                            json_str = await _silent_decode(payload)
+                            json_str = await DeCode_PackEt(payload)
                             if json_str:
                                 parsed = json.loads(json_str)
                                 f5 = parsed.get('5', {})
@@ -1473,7 +1488,7 @@ class ClanGloryBot:
                             try:
                                 decrypted = await DEc_PacKeT(payload, leader.key, leader.iv)
                                 if decrypted:
-                                    json_str = await _silent_decode(decrypted)
+                                    json_str = await DeCode_PackEt(decrypted)
                                     if json_str:
                                         parsed = json.loads(json_str)
                                         f2 = parsed.get('2', {})
@@ -1509,7 +1524,7 @@ class ClanGloryBot:
                             except:
                                 pass
                             # Try raw decode
-                            json_str = await _silent_decode(payload)
+                            json_str = await DeCode_PackEt(payload)
                             if json_str:
                                 parsed = json.loads(json_str)
                                 f2 = parsed.get('2', {})
@@ -1606,7 +1621,7 @@ class ClanGloryBot:
                             payload = resp_hex[skip:]
                             if len(payload) < 20:
                                 continue
-                            json_str = await _silent_decode(payload)
+                            json_str = await DeCode_PackEt(payload)
                             if not json_str:
                                 continue
                             parsed = json.loads(json_str)
@@ -1840,14 +1855,14 @@ class ClanGloryBot:
                                 try:
                                     decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
                                     if decrypted:
-                                        json_str = await _silent_decode(decrypted)
+                                        json_str = await DeCode_PackEt(decrypted)
                                         if json_str:
                                             parsed = json.loads(json_str)
                                 except:
                                     pass
                                 if not parsed:
                                     try:
-                                        json_str = await _silent_decode(payload)
+                                        json_str = await DeCode_PackEt(payload)
                                         if json_str:
                                             parsed = json.loads(json_str)
                                     except:
@@ -1928,7 +1943,7 @@ class ClanGloryBot:
                                 try:
                                     decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
                                     if decrypted:
-                                        json_str = await _silent_decode(decrypted)
+                                        json_str = await DeCode_PackEt(decrypted)
                                         if json_str:
                                             parsed = json.loads(json_str)
                                 except:
@@ -1936,7 +1951,7 @@ class ClanGloryBot:
                                 # Try raw decode if decryption failed
                                 if not parsed:
                                     try:
-                                        json_str = await _silent_decode(payload)
+                                        json_str = await DeCode_PackEt(payload)
                                         if json_str:
                                             parsed = json.loads(json_str)
                                     except:
