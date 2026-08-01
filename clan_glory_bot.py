@@ -953,7 +953,16 @@ class GuestConnection:
             pass
 
     async def cleanup(self):
-        """Close all TCP connections."""
+        """Close all TCP connections and stop keepalive loop."""
+        # Stop background keepalive loop
+        if hasattr(self, '_ka_stop') and self._ka_stop:
+            self._ka_stop.set()
+        if hasattr(self, '_ka_task') and self._ka_task:
+            self._ka_task.cancel()
+            try:
+                await asyncio.wait_for(self._ka_task, timeout=2)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
         for writer in [self.online_writer, self.chat_writer]:
             if writer and not writer.is_closing():
                 try:
