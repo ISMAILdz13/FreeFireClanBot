@@ -609,7 +609,7 @@ class GuestConnection:
                             payload_data = await DEc_PacKeT(payload, self.key, self.iv)
                             if not payload_data:
                                 continue
-                        json_str = await _silent_decode(payload_data)
+                        json_str = await DeCode_PackEt(payload_data)
                         if not json_str:
                             continue
                         packet_json = json.loads(json_str)
@@ -657,7 +657,7 @@ class GuestConnection:
             if len(payload) < 20:
                 break
             try:
-                json_str = await _silent_decode(payload)
+                json_str = await DeCode_PackEt(payload)
                 if not json_str:
                     continue
                 packet_json = json.loads(json_str)
@@ -699,7 +699,7 @@ class GuestConnection:
             if len(payload) < 20:
                 break
             try:
-                json_str = await _silent_decode(payload)
+                json_str = await DeCode_PackEt(payload)
                 if json_str:
                     packet_json = json.loads(json_str)
                     try:
