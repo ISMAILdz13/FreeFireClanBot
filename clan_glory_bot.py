@@ -41,6 +41,7 @@ import time
 import random
 import signal
 from datetime import datetime
+import socket
 from typing import Optional
 
 # ======================== PATH SETUP ========================
@@ -399,7 +400,11 @@ class GuestConnection:
     # ── TCP Connection ──────────────────────────────────
 
     async def connect_tcp(self) -> bool:
-        """Connect to Online + Chat TCP servers using xAuThSTarTuP token."""
+        """Connect to Online + Chat TCP servers using xAuThSTarTuP token.
+        
+        Sets OS-level TCP keepalive (SO_KEEPALIVE) on both sockets to prevent
+        NAT/firewall idle drops, plus application-level field-99 keepalive.
+        """
         try:
             auth_token_hex = await build_tcp_auth_token(
                 self.account_uid, self.jwt, self.timestamp, self.key, self.iv)
@@ -407,11 +412,21 @@ class GuestConnection:
 
             self.online_reader, self.online_writer = await asyncio.open_connection(
                 self.online_ip, self.online_port)
-            self.online_writer.write(auth_token_bytes)
-            await self.online_writer.drain()
-
             self.chat_reader, self.chat_writer = await asyncio.open_connection(
                 self.chat_ip, self.chat_port)
+
+            # OS-level TCP keepalive on both sockets
+            for writer in [self.online_writer, self.chat_writer]:
+                sock = writer.get_extra_info('socket')
+                if sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    if hasattr(socket, 'TCP_KEEPIDLE'):
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 15)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
+            self.online_writer.write(auth_token_bytes)
+            await self.online_writer.drain()
             self.chat_writer.write(auth_token_bytes)
             await self.chat_writer.drain()
 
@@ -419,7 +434,10 @@ class GuestConnection:
             await self.send_global_auth()
 
             self.connected = True
-            print(f"  [G{self.index+1}] TCP OK")
+            self._ka_silent_count = 0  # watchdog: unanswered keepalives
+            self._ka_stop = asyncio.Event()
+            self._ka_task = asyncio.create_task(self.keepalive_loop(self._ka_stop))
+            print(f"  [G{self.index+1}] TCP OK (SO_KEEPALIVE + field-99 keepalive loop)")
             return True
         except Exception as e:
             print(f"  [G{self.index+1}] TCP connect FAIL: {e}")
@@ -444,29 +462,55 @@ class GuestConnection:
                 print(f"  [G{self.index+1}] {channel} send error: {e}")
             return False
 
-    async def send_keepalive(self):
-        """Send keep-alive packet (field 1=99 with timestamp) to maintain connection.
+    async def send_keepalive(self, channel="online"):
+        """Send keep-alive packet (field 1=99) on the specified channel.
         
-        Based on OB54-TCP-BOT send_keep_alive():
-            fields = {1: 99, 2: {1: int(time.time()), 2: 1}}
+        CRITICAL: Online channel uses 0515 header, Chat channel uses 1215 header.
+        The reference bot (OB54-TCP-BOT) had a bug where it sent 0515 on the chat
+        channel — this caused the chat server to drop the packet or disconnect.
         
-        This is the PROPER heartbeat — NOT field 9 (match-start).
-        Using field 9 as keepalive was killing connections because the server
-        interpreted it as repeated match-start requests.
+        Interval: 15 seconds (not faster — triggers rate limiting at <5s).
+        Watchdog: force reconnect after 8 unanswered keepalives.
         """
         if not self.connected:
             return False
         try:
             fields = {1: 99, 2: {1: int(time.time()), 2: 1}}
             proto = await CrEaTe_ProTo(fields)
-            pkt_type = get_packet_type(self.region)
-            pkt = await GeneRaTePk(proto.hex(), pkt_type, self.key, self.iv)
-            return await self.send_packet(pkt, channel="online")
+            if channel == "chat":
+                pkt = await GeneRaTePk(proto.hex(), "1215", self.key, self.iv)
+            else:
+                pkt_type = get_packet_type(self.region)
+                pkt = await GeneRaTePk(proto.hex(), pkt_type, self.key, self.iv)
+            ok = await self.send_packet(pkt, channel=channel)
+            if ok:
+                self._ka_silent_count = getattr(self, '_ka_silent_count', 0) + 1
+                if self._ka_silent_count >= 8:
+                    print(f"  [G{self.index+1}] Watchdog: 8 unanswered keepalives, forcing reconnect")
+                    self.connected = False
+                    return False
+            return ok
         except Exception as e:
             if self.connected:
                 print(f"  [G{self.index+1}] Keepalive error: {e}")
                 self.connected = False
             return False
+
+    def reset_ka_watchdog(self):
+        """Call when any data is received from the server."""
+        self._ka_silent_count = 0
+
+    async def keepalive_loop(self, stop_event=None):
+        """Background keepalive loop: send field 99 every 15s on BOTH channels.
+        
+        This runs continuously while the connection is alive, not just during
+        exploit_cycle. Connections die during squad formation too if no
+        keepalive is sent.
+        """
+        while self.connected and (stop_event is None or not stop_event.is_set()):
+            await self.send_keepalive(channel="online")
+            await self.send_keepalive(channel="chat")
+            await asyncio.sleep(15)
 
     async def send_global_auth(self):
         """Send AutH_GlobAl packet — required after TCP connect."""
@@ -1459,24 +1503,24 @@ class ClanGloryBot:
         return True
 
     async def exploit_cycle(self) -> bool:
-        """Glory cycle based on reverse-engineered OB54-TCP-BOT reference code.
+        """Glory cycle based on reverse-engineered OB54-TCP-BOT + Muraxlee reference.
         
-        Proven workflow from reference bot:
+        Proven workflow:
         1. Form squad (OpEnSq + join)
         2. ALL bots spam field 1=9 on ONLINE channel (17s, 0.2s delay)
-        3. After spam: send keepalive field 1=99 every 3s to stay alive
+        3. Background keepalive_loop sends field 99 every 15s on BOTH channels
         4. Read both channels for match packet (f2=18)
         5. Wait up to 80s for match
         6. Leave squad and repeat
         
-        CRITICAL: Keepalive is field 99 (NOT field 9).
-        Field 9 as keepalive = server sees repeated match-starts = connection killed.
-        Field 99 = proper heartbeat with timestamp = connection stays alive.
+        CRITICAL: Keepalive (field 99) runs as a background task started in
+        connect_tcp(). It sends on BOTH channels (online: 0515, chat: 1215)
+        every 15 seconds. This prevents the 15-30s server idle timeout.
         """
         await self.form_squad()
         await asyncio.sleep(2)
 
-        # Build field-9 spam packet for each connection (start match)
+        # Build field-9 spam packet for each connection
         spam_packets = {}
         for conn in self.connections:
             if conn.connected:
@@ -1484,18 +1528,15 @@ class ClanGloryBot:
                 proto = await CrEaTe_ProTo(fields)
                 pkt_type = get_packet_type(self.region)
                 spam_packets[conn.index] = await GeneRaTePk(proto.hex(), pkt_type, conn.key, conn.iv)
-        
-        # ── PHASE 1: Spam field 1=9 on ONLINE channel (17s, 0.2s delay) ──
+
         SPAM_DURATION = 17
         SPAM_DELAY = 0.2
         MATCH_WAIT = 80
-        total_wait = SPAM_DURATION + MATCH_WAIT
-        deadline = asyncio.get_event_loop().time() + total_wait
-        
-        print(f"  >> PHASE 1: Spam field=9 on ONLINE channel ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
-        
+        deadline = asyncio.get_event_loop().time() + SPAM_DURATION + MATCH_WAIT
+
+        # ── PHASE 1: Spam field 1=9 on ONLINE channel (17s) ──
+        print(f"  >> Spam field=9 on ONLINE ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
         async def spam_phase(conns, duration, delay):
-            """Spam field 1=9 on online channel only."""
             end_time = asyncio.get_event_loop().time() + duration
             sent = 0
             while asyncio.get_event_loop().time() < end_time:
@@ -1504,32 +1545,13 @@ class ClanGloryBot:
                         continue
                     pkt = spam_packets.get(conn.index)
                     if pkt:
-                        ok = await conn.send_packet(pkt, channel="online")
-                        if ok:
+                        if await conn.send_packet(pkt, channel="online"):
                             sent += 1
-                        else:
-                            print(f"  [G{conn.index+1}] Spam send failed (connection dead)")
                 await asyncio.sleep(delay)
             return sent
-        
-        # ── PHASE 2: Keepalive with field 1=99 every 3s while reading ──
-        print(f"  >> PHASE 2: Keepalive field=99 every 3s + read for match ({MATCH_WAIT}s)...")
-        
-        async def keepalive_phase(conns, deadline):
-            """Send field 1=99 keepalive every 3s on online channel."""
-            sent = 0
-            while asyncio.get_event_loop().time() < deadline:
-                for conn in conns:
-                    if not conn.connected or conn.match_found:
-                        continue
-                    ok = await conn.send_keepalive()
-                    if ok:
-                        sent += 1
-                await asyncio.sleep(3.0)
-            return sent
-        
-        async def read_channel_for_match(conn, channel_name, reader, deadline):
-            """Read from a channel until match found or deadline."""
+
+        # ── Read both channels for match (f2=18) ──
+        async def read_channel(conn, channel_name, reader, deadline):
             label = f"G{conn.index+1}/{channel_name}"
             while asyncio.get_event_loop().time() < deadline:
                 if conn.match_found:
@@ -1538,19 +1560,17 @@ class ClanGloryBot:
                     resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
                     if not resp:
                         conn.connected = False
-                        print(f"  [{label}] connection closed by server")
+                        print(f"  [{label}] connection closed")
                         break
+                    conn.reset_ka_watchdog()  # got data, reset watchdog
                     resp_hex = resp.hex()
                     if len(resp_hex) > 40:
                         print(f"  [{label}] DATA: {len(resp_hex)} hex, header={resp_hex[:16]}")
-                    
-                    # Try to decode at multiple offsets
                     for skip in [10, 8, 12, 6, 4, 0, 14, 16, 18, 20, 2, 22, 24]:
                         try:
                             payload = resp_hex[skip:]
                             if len(payload) < 20:
                                 continue
-                            # Try decryption (chat packets may be encrypted)
                             try:
                                 decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
                                 if decrypted:
@@ -1568,18 +1588,12 @@ class ClanGloryBot:
                                                 if isinstance(f1_5, dict) and 'data' in f1_5:
                                                     group_id = f1_5['data']
                                             if group_id and isinstance(group_id, int) and group_id > 1000000000:
-                                                print(f"  [{label}] MATCH FOUND! (decrypted) f2=18, GroupID={group_id}")
+                                                print(f"  [{label}] MATCH FOUND! (decrypted) GroupID={group_id}")
                                                 conn.match_found = True
                                                 conn.match_data = parsed
-                                                for k in sorted(f5d.keys())[:15]:
-                                                    v = f5d[k]
-                                                    if isinstance(v, dict) and 'data' in v:
-                                                        print(f"    5.{k} = {str(v['data'])[:150]}")
-                                                print(f"  *** MATCH PACKET for G{conn.index+1}! ***")
                                                 await conn.join_match(group_id)
                             except:
                                 pass
-                            # Try raw decode
                             json_str = await DeCode_PackEt(payload)
                             if not json_str:
                                 continue
@@ -1588,7 +1602,6 @@ class ClanGloryBot:
                             f2_val = f2.get('data') if isinstance(f2, dict) else f2
                             if not isinstance(f2_val, int) or f2_val < 1:
                                 continue
-                            
                             if f2_val == 18 and not conn.match_found:
                                 f5 = parsed.get('5', {})
                                 f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
@@ -1597,17 +1610,10 @@ class ClanGloryBot:
                                     f1_5 = f5d.get('1', {})
                                     if isinstance(f1_5, dict) and 'data' in f1_5:
                                         group_id = f1_5['data']
-                                
                                 if group_id and isinstance(group_id, int) and group_id > 1000000000:
-                                    print(f"  [{label}] MATCH FOUND! f2=18, GroupID={group_id}")
+                                    print(f"  [{label}] MATCH FOUND! GroupID={group_id}")
                                     conn.match_found = True
                                     conn.match_data = parsed
-                                    for k in sorted(f5d.keys())[:15]:
-                                        v = f5d[k]
-                                        if isinstance(v, dict) and 'data' in v:
-                                            print(f"    5.{k} = {str(v['data'])[:150]}")
-                                    print(f"  *** MATCH PACKET for G{conn.index+1}! ***")
-                                    print(f"  [G{conn.index+1}] Joining match room (GroupID={group_id})...")
                                     await conn.join_match(group_id)
                             break
                         except:
@@ -1618,39 +1624,22 @@ class ClanGloryBot:
                     print(f"  [{label}] read error: {e}")
                     conn.connected = False
                     break
-            
-            if not conn.match_found:
-                print(f"  [{label}] no match packet found")
-        
-        # Run everything concurrently:
-        # Phase 1: spam (17s) + read (full 97s)
-        # Phase 2: keepalive (after 17s, for remaining 80s) + read continues
-        
-        # Reads run for full duration
+
+        # Run spam + reads concurrently
         read_tasks = []
         for conn in self.connections:
             if not conn.connected:
                 continue
-            read_tasks.append(read_channel_for_match(conn, "online", conn.online_reader, deadline))
-            read_tasks.append(read_channel_for_match(conn, "chat", conn.chat_reader, deadline))
-        
-        # Spam phase (17s) then keepalive phase (80s)
-        async def spam_then_keepalive(conns, deadline):
-            spam_count = await spam_phase(conns, SPAM_DURATION, SPAM_DELAY)
-            print(f"  >> Spam done: {spam_count} packets. Switching to keepalive (field=99)...")
-            ka_count = await keepalive_phase(conns, deadline)
-            return spam_count, ka_count
-        
-        all_tasks = [spam_then_keepalive(self.connections, deadline)] + read_tasks
+            read_tasks.append(read_channel(conn, "online", conn.online_reader, deadline))
+            read_tasks.append(read_channel(conn, "chat", conn.chat_reader, deadline))
+
+        all_tasks = [spam_phase(self.connections, SPAM_DURATION, SPAM_DELAY)] + read_tasks
         results = await asyncio.gather(*all_tasks, return_exceptions=True)
-        
-        spam_count, ka_count = (0, 0)
-        if isinstance(results[0], tuple):
-            spam_count, ka_count = results[0]
-        
+
+        spam_count = results[0] if isinstance(results[0], int) else 0
         alive_count = sum(1 for c in self.connections if c.connected)
-        print(f"  >> Spam: {spam_count} pkts, Keepalive: {ka_count} pkts, {alive_count} alive")
-        
+        print(f"  >> Spam: {spam_count} pkts, {alive_count} alive")
+
         # Share GroupID
         match_finders = [c for c in self.connections if c.match_found and c.match_data]
         if match_finders:
@@ -1665,15 +1654,14 @@ class ClanGloryBot:
                 if shared_group_id:
                     for conn in self.connections:
                         if conn.connected and not conn.match_found:
-                            print(f"  [G{conn.index+1}] Joining match from shared GroupID={shared_group_id}")
+                            print(f"  [G{conn.index+1}] Joining from shared GroupID={shared_group_id}")
                             await conn.join_match(shared_group_id)
                             conn.match_found = True
-        
-        matches_this_cycle = sum(1 for c in self.connections if c.match_found)
-        print(f"  >> {matches_this_cycle} match(es) found, {alive_count} connections alive")
-        
-        # Leave squad (field 1=7)
-        print(f"  >> Leaving squad...")
+
+        matches = sum(1 for c in self.connections if c.match_found)
+        print(f"  >> {matches} match(es), {alive_count} alive")
+
+        # Leave squad
         for conn in self.connections:
             if conn.connected:
                 try:
@@ -1685,11 +1673,9 @@ class ClanGloryBot:
                     conn.match_data = None
                 except:
                     pass
-        
-        print(f"  >> Waiting {CYCLE_DELAY}s before next cycle...")
+
         await asyncio.sleep(CYCLE_DELAY)
-        
-        return matches_this_cycle > 0
+        return matches > 0
 
     async def run(self):
         """Main exploit loop."""

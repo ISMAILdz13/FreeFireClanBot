@@ -301,7 +301,7 @@ class TestMatchWaitTiming(unittest.TestCase):
         with open(bot_path) as f:
             source = f.read()
         self.assertIn("asyncio.gather", source)
-        self.assertIn("read_channel_for_match", source)
+        self.assertIn("read_channel", source)
         self.assertIn("deadline", source)
 
 

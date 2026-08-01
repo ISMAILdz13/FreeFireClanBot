@@ -423,7 +423,7 @@ class TestBotConfigurationConstants(unittest.TestCase):
         with open(bot_path) as f:
             source = f.read()
         self.assertIn("asyncio.gather", source)
-        self.assertIn("read_channel_for_match", source)
+        self.assertIn("read_channel", source)
 
 
 class TestConnectionMatchState(unittest.TestCase):
@@ -529,13 +529,13 @@ class TestConnectionMatchState(unittest.TestCase):
         self.assertNotEqual(packet1, packet2)
 
     async def test_read_channel_sets_connected_false_on_empty_resp(self):
-        """FIX: read_channel_for_match should set connected=False on empty response."""
+        """FIX: read_channel should set connected=False on empty response."""
         conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
         conn.connected = True
         reader = AsyncMock()
         reader.read.return_value = b""
         conn.online_reader = reader
-        result = await conn.read_channel_for_match("online", 1.0)
+        result = await conn.read_channel("online", 1.0)
         self.assertIsNone(result)
         self.assertFalse(conn.connected)
 
@@ -569,40 +569,52 @@ class TestConnectionMatchState(unittest.TestCase):
 
     # ── FIELD 99 KEEPALIVE TESTS ─────────────────────────
 
-    async def test_send_keepalive_exists(self):
-        """GuestConnection should have send_keepalive method (field 1=99)."""
+
+    # ── KEEPALIVE TESTS (DUAL-CHANNEL + WATCHDOG) ─────────
+
+    async def test_send_keepalive_dual_channel(self):
+        """send_keepalive should support both 'online' and 'chat' channels."""
         import inspect
-        self.assertTrue(hasattr(GuestConnection, 'send_keepalive'),
-                        "GuestConnection should have send_keepalive method")
+        sig = inspect.signature(GuestConnection.send_keepalive)
+        self.assertIn('channel', sig.parameters,
+                      "send_keepalive should accept channel parameter")
         source = inspect.getsource(GuestConnection.send_keepalive)
-        self.assertIn("1: 99", source, "Keepalive should use field 1=99")
-        self.assertIn("time.time()", source, "Keepalive should include timestamp")
+        self.assertIn("1: 99", source, "Should use field 1=99")
+        self.assertIn("1215", source, "Should use 1215 header for chat channel")
 
-    async def test_exploit_cycle_uses_field9_for_spam(self):
-        """Spam phase should use field 1=9."""
+    async def test_keepalive_loop_exists(self):
+        """keepalive_loop should exist as a background task method."""
+        import inspect
+        self.assertTrue(hasattr(GuestConnection, 'keepalive_loop'),
+                        "Should have keepalive_loop method")
+        source = inspect.getsource(GuestConnection.keepalive_loop)
+        self.assertIn("15", source, "Should send every 15 seconds")
+        self.assertIn("online", source, "Should send on online channel")
+        self.assertIn("chat", source, "Should send on chat channel")
+
+    async def test_reset_ka_watchdog(self):
+        """reset_ka_watchdog should exist for when data is received."""
+        self.assertTrue(hasattr(GuestConnection, 'reset_ka_watchdog'),
+                        "Should have reset_ka_watchdog method")
+
+    async def test_connect_tcp_sets_keepalive(self):
+        """connect_tcp should start a background keepalive task."""
+        import inspect
+        source = inspect.getsource(GuestConnection.connect_tcp)
+        self.assertIn("SO_KEEPALIVE", source, "Should set OS-level keepalive")
+        self.assertIn("keepalive_loop", source, "Should start keepalive_loop task")
+        self.assertIn("TCP_KEEPIDLE", source, "Should set TCP_KEEPIDLE")
+
+    async def test_exploit_cycle_spam_field9(self):
+        """exploit_cycle should spam field 1=9 on online channel."""
         import inspect
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("1: 9", source, "Spam should use field 1=9")
-        self.assertIn("SPAM_DELAY", source, "Should have configurable SPAM_DELAY")
-
-    async def test_exploit_cycle_uses_field99_for_keepalive(self):
-        """Keepalive phase should use field 1=99 (NOT field 9)."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("keepalive", source.lower(), "Should have keepalive phase")
-        self.assertIn("send_keepalive", source, "Should call send_keepalive")
+        self.assertIn("1: 9", source, "Should use field 1=9 for spam")
+        self.assertIn("SPAM_DELAY", source, "Should have configurable delay")
         self.assertNotIn("269", source, "Should NOT use field 269")
 
-    async def test_exploit_cycle_spam_then_keepalive(self):
-        """Should have two phases: spam (17s) then keepalive (80s)."""
+    async def test_no_field_269_anywhere(self):
+        """Field 269 (fake opcode) should not appear in exploit_cycle."""
         import inspect
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("spam_phase", source, "Should have spam_phase")
-        self.assertIn("keepalive_phase", source, "Should have keepalive_phase")
-        self.assertIn("spam_then_keepalive", source, "Should transition from spam to keepalive")
-
-    async def test_exploit_cycle_online_only_sending(self):
-        """All sending should be on online channel only."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn('channel="online"', source, "Should send on online channel")
+        self.assertNotIn("269", source, "Field 269 is a fake opcode — should not be used")
