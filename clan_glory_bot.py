@@ -1854,23 +1854,26 @@ class ClanGloryBot:
             if not leader.connected:
                 break
             
-            # Check for match-found packet on ALL chat channels (non-blocking)
+            # Check for match-found packet on ALL channels (both online AND chat)
             for conn in self.connections:
                 if not conn.connected:
                     continue
-                try:
-                    data = await asyncio.wait_for(conn.chat_reader.read(9999), timeout=0.1)
-                    if data:
+                # Read from BOTH online and chat channels
+                for reader, ch_name in [(conn.online_reader, "online"), (conn.chat_reader, "chat")]:
+                    try:
+                        data = await asyncio.wait_for(reader.read(9999), timeout=0.1)
+                        if not data:
+                            continue
                         conn.reset_ka_watchdog()
                         data_hex = data.hex()
                         if len(data_hex) > 100:
-                            print(f"  [G{conn.index+1}/chat] DATA: {len(data_hex)} hex")
+                            print(f"  [G{conn.index+1}/{ch_name}] DATA: {len(data_hex)} hex, raw={data_hex[:120]}")
+                        decoded_any = False
                         for skip in range(0, min(30, len(data_hex)//2)):
                             try:
                                 payload = data_hex[skip:]
                                 if len(payload) < 20:
                                     continue
-                                # Try decryption first
                                 parsed = None
                                 try:
                                     decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
@@ -1888,17 +1891,21 @@ class ClanGloryBot:
                                     except:
                                         pass
                                 if parsed:
-                                    # Print ALL decoded packets for debugging
+                                    decoded_any = True
                                     f1 = parsed.get('1', {})
                                     f1_val = f1.get('data') if isinstance(f1, dict) else f1
                                     f2 = parsed.get('2', {})
                                     f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                                    if len(data_hex) < 2000:
+                                        f1s = str(f1_val)[:60] if f1_val else '?'
+                                        f2s = str(f2_val)[:60] if f2_val else '?'
+                                        print(f"    [debug] G{conn.index+1}/{ch_name} f1={f1s} f2={f2s} skip={skip}")
+                                        for dk in sorted(parsed.keys())[:8]:
+                                            dv = parsed[dk]
+                                            dvv = dv.get('data') if isinstance(dv, dict) else dv
+                                            print(f"    [debug]   f{dk}={str(dvv)[:100]}")
                                     if isinstance(f2_val, int) and f2_val == 18:
                                         f5 = parsed.get('5', {})
-                                        # Print f1/f2 for all packets (not just f2=18)
-                                        if len(data_hex) < 1000:
-                                            f1_short = str(f1_val)[:60] if f1_val else '?'
-                                            print(f"    [debug] f1={f1_short}, f2={f2_val}, len={len(data_hex)}")
                                         if isinstance(f5, dict) and 'data' in f5:
                                             f5d = f5['data']
                                             if isinstance(f5d, dict):
@@ -1907,26 +1914,26 @@ class ClanGloryBot:
                                                     gid = f51['data']
                                                     if int(gid) > 1000000 and not match_found:
                                                         match_found = True
-                                                        print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/chat)")
-                                                        print(f"  >> Joining match for all connections...")
+                                                        print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
                                                         for c in self.connections:
                                                             if c.connected:
                                                                 await c.join_match(gid)
                                                                 c.match_found = True
                                                                 await asyncio.sleep(0.5)
                                                         break
-                                        break
+                                    break
                             except:
                                 continue
-                    if match_found:
-                        break
-                except asyncio.TimeoutError:
-                    pass
-                except Exception:
-                    pass
-            if match_found:
-                break  # stop spamming, match is found
-            
+                        if not decoded_any and len(data_hex) < 2000:
+                            print(f"    [debug] G{conn.index+1}/{ch_name} UNDECODABLE ({len(data_hex)} hex)")
+                        if match_found:
+                            break
+                    except asyncio.TimeoutError:
+                        pass
+                    except Exception:
+                        pass
+                if match_found:
+                    break
             await asyncio.sleep(SPAM_DELAY)
 
         alive_count = sum(1 for c in self.connections if c.connected)
