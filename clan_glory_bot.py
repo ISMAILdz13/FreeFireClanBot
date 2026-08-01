@@ -435,10 +435,8 @@ class GuestConnection:
 
             self.connected = True
             self._last_data_time = time.time()  # timestamp-based watchdog
-            self._drain_paused = False  # exploit_cycle pauses drain to read match packets
             self._ka_stop = asyncio.Event()
             self._ka_task = asyncio.create_task(self.keepalive_loop(self._ka_stop))
-            self._drain_task = asyncio.create_task(self.drain_loop(self._ka_stop))
             print(f"  [G{self.index+1}] TCP OK (SO_KEEPALIVE + field-99 keepalive loop)")
             return True
         except Exception as e:
@@ -506,35 +504,6 @@ class GuestConnection:
                 self.connected = False
                 break
             await asyncio.sleep(15)
-
-    async def drain_loop(self, stop_event=None):
-        """Background data drain: continuously read from BOTH channels.
-        
-        Drains incoming data so sockets don't fill up, and resets the watchdog
-        whenever ANY data arrives. Paused during exploit_cycle's read phase
-        so it doesn't eat match packets.
-        """
-        while self.connected and (stop_event is None or not stop_event.is_set()):
-            if getattr(self, '_drain_paused', False):
-                await asyncio.sleep(0.5)
-                continue
-            for reader, name in [(self.online_reader, "online"), (self.chat_reader, "chat")]:
-                if not reader or not self.connected:
-                    continue
-                try:
-                    resp = await asyncio.wait_for(reader.read(65535), timeout=0.5)
-                    if resp:
-                        self.reset_ka_watchdog()
-                    elif resp is not None and len(resp) == 0:
-                        if self.connected:
-                            print(f"  [G{self.index+1}/{name}] drain: connection closed")
-                            self.connected = False
-                        break
-                except asyncio.TimeoutError:
-                    continue
-                except Exception:
-                    continue
-            await asyncio.sleep(0.1)
 
     async def send_global_auth(self):
         """Send AutH_GlobAl packet — required after TCP connect."""
@@ -981,7 +950,7 @@ class GuestConnection:
         # Stop background loops
         if hasattr(self, '_ka_stop') and self._ka_stop:
             self._ka_stop.set()
-        for task_attr in ['_ka_task', '_drain_task']:
+        for task_attr in ['_ka_task']:
             task = getattr(self, task_attr, None)
             if task:
                 task.cancel()
@@ -1569,10 +1538,6 @@ class ClanGloryBot:
         MATCH_WAIT = 80
         deadline = asyncio.get_event_loop().time() + SPAM_DURATION + MATCH_WAIT
 
-        # Pause background drain so it doesn't eat match packets
-        for conn in self.connections:
-            conn._drain_paused = True
-
         # ── PHASE 1: Spam field 1=9 on ONLINE channel (17s) ──
         print(f"  >> Spam field=9 on ONLINE ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
         async def spam_phase(conns, duration, delay):
@@ -1699,10 +1664,6 @@ class ClanGloryBot:
 
         matches = sum(1 for c in self.connections if c.match_found)
         print(f"  >> {matches} match(es), {alive_count} alive")
-
-        # Resume background drain
-        for conn in self.connections:
-            conn._drain_paused = False
 
         # Leave squad
         for conn in self.connections:

@@ -624,19 +624,3 @@ class TestConnectionMatchState(unittest.TestCase):
         self.assertIn("_last_data_time", source, "Should use timestamp-based watchdog")
         self.assertIn("120", source, "Should use 120s threshold")
         self.assertNotIn("_ka_silent_count", source, "Should NOT use old counter")
-
-    async def test_drain_loop_exists(self):
-        """drain_loop should exist for background data reading."""
-        import inspect
-        self.assertTrue(hasattr(GuestConnection, 'drain_loop'),
-                        "Should have drain_loop method")
-        source = inspect.getsource(GuestConnection.drain_loop)
-        self.assertIn("reset_ka_watchdog", source, "Should reset watchdog on data")
-        self.assertIn("_drain_paused", source, "Should check pause flag")
-
-    async def test_drain_pause_in_exploit_cycle(self):
-        """exploit_cycle should pause/resume drain around read phase."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("_drain_paused = True", source, "Should pause drain before spam")
-        self.assertIn("_drain_paused = False", source, "Should resume drain after")
