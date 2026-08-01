@@ -893,18 +893,29 @@ class GuestConnection:
             }
             proto_bytes = await CrEaTe_ProTo(fields)
             proto_hex = proto_bytes.hex()
-            # Packet type 0e15 = room join (online channel)
+            # Packet type 0e15 = room join (online channel) — FULL fields
             packet = await GeneRaTePk(proto_hex, "0e15", self.key, self.iv)
             await self.send_packet(packet, channel="online")
             print(f"  [G{self.index+1}] Match join sent (GroupID={group_id}, type=0e15)")
             await asyncio.sleep(0.5)
-            # Also try chat channel (match packets came on chat)
+            # Chat channel join (type 1215) — SIMPLER fields per reference bot
+            # join_room_chanel uses: 1=3, 2={1=room_id, 2=3, 3="en"}
             try:
-                packet_chat = await GeneRaTePk(proto_hex, "1215", self.key, self.iv)
-                await self.send_packet(packet_chat, channel="chat")
-                print(f"  [G{self.index+1}] Match join also sent on chat (type=1215)")
-            except:
-                pass
+                chat_fields = {
+                    1: 3,
+                    2: {
+                        1: group_id,
+                        2: 3,        # integer 3, NOT password string
+                        3: "en",     # language
+                    }
+                }
+                chat_proto = await CrEaTe_ProTo(chat_fields)
+                chat_hex = chat_proto.hex() + "7200"
+                chat_packet = await GeneRaTePk(chat_hex, "1215", self.key, self.iv)
+                await self.send_packet(chat_packet, channel="chat")
+                print(f"  [G{self.index+1}] Chat channel join sent (type=1215)")
+            except Exception as chat_err:
+                print(f"  [G{self.index+1}] Chat join failed: {chat_err}")
             return True
         except Exception as e:
             print(f"  [G{self.index+1}] Match join error: {e}")
@@ -1060,41 +1071,137 @@ class ClanGloryBot:
         self.total_glory_estimated = 0
 
     async def check_clan_glory(self, label: str = ""):
-        """Check clan glory by re-running GetLoginData and extracting clan_compiled_data.
-        We know GetLoginData works — it's what authenticate() uses.
-        The clan_compiled_data field contains clan info including glory."""
+        """Check clan glory using GetClanInfoByClanID API.
+        Returns raw protobuf with fields:
+        1=clanId, 2=clanName, 5=activityScore, 6=memberCount, 7=clanLevel.
+        Also checks clan_compiled_data from GetLoginData for comparison."""
+        import urllib.request
         try:
             conn = self.connections[0]
             if not conn.jwt or not conn.access_token:
                 print(f"  [CLAN] {label}: no auth available")
                 return None
-            # Re-build MajorLogin payload and call GetLoginData
-            payload = await build_major_login(conn.open_id, conn.access_token)
-            login_data = await get_login_data(payload, conn.server_url, conn.jwt)
-            if login_data:
-                ccd = login_data.get("clan_compiled_data", "")
-                if ccd:
-                    # Try to decode clan_compiled_data
-                    print(f"  [CLAN] {label}: clan_compiled_data = {len(str(ccd))} chars")
-                    # Try hex decode
-                    ccd_str = str(ccd)
-                    if all(c in '0123456789abcdef' for c in ccd_str[:20].lower()) and len(ccd_str) > 20:
-                        json_str = await DeCode_PackEt(ccd_str)
-                        if json_str:
-                            parsed = json.loads(json_str)
-                            print(f"  [CLAN] {label}: decoded clan data:")
-                            for k, v in sorted(parsed.items())[:20]:
-                                if isinstance(v, dict) and 'data' in v:
-                                    print(f"  [CLAN] {label}: field {k} = {str(v['data'])[:120]}")
-                        else:
-                            print(f"  [CLAN] {label}: clan data (hex, first 100): {ccd_str[:100]}")
-                    else:
+
+            # ── Method 1: GetClanInfoByClanID (proper API) ──
+            try:
+                from Crypto.Cipher import AES
+                from Crypto.Util.Padding import pad
+
+                # Encrypt clan_id payload (same as reference bot)
+                clan_id_varint = ''
+                cid = int(self.clan_id)
+                while cid > 0:
+                    b = cid & 0x7F
+                    cid >>= 7
+                    if cid > 0:
+                        b |= 0x80
+                    clan_id_varint += f'{b:02x}'
+                payload = f"08{clan_id_varint}"
+
+                api_key = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94, 56])
+                api_iv = bytes([54, 111, 121, 90, 68, 114, 50, 50, 69, 51, 121, 99, 104, 106, 77, 37])
+                cipher = AES.new(api_key, AES.MODE_CBC, api_iv)
+                encrypted = cipher.encrypt(pad(bytes.fromhex(payload), AES.block_size))
+
+                body = encrypted
+                headers = {
+                    "Authorization": f"Bearer {conn.jwt}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-A515F Build/PI)",
+                    "X-Unity-Version": "2018.4.11f1",
+                    "X-GA": "v1 1",
+                    "ReleaseVersion": "OB53",
+                    "Connection": "Keep-Alive",
+                    "Accept-Encoding": "gzip",
+                }
+
+                # Try multiple endpoints
+                region_urls = {
+                    "ME": "https://clientbp.ggpolarbear.com/GetClanInfoByClanID",
+                }
+                urls = [
+                    region_urls.get(self.region, "https://clientbp.ggpolarbear.com/GetClanInfoByClanID"),
+                    "https://clientbp.common.ggbluefox.com/GetClanInfoByClanID",
+                    "https://clientbp.ggblueshark.com/GetClanInfoByClanID",
+                ]
+
+                for url in urls:
+                    try:
+                        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            raw = resp.read()
+                            if len(raw) > 0:
+                                # Decode raw protobuf
+                                def decode_proto(data):
+                                    result = {}
+                                    i, n = 0, len(data)
+                                    while i < n:
+                                        try:
+                                            tag, shift = 0, 0
+                                            while i < n:
+                                                b = data[i]; i += 1
+                                                tag |= (b & 0x7F) << shift; shift += 7
+                                                if not (b & 0x80): break
+                                            fid = tag >> 3
+                                            wt = tag & 0x7
+                                            if wt == 0:  # varint
+                                                val, shift = 0, 0
+                                                while i < n:
+                                                    b = data[i]; i += 1
+                                                    val |= (b & 0x7F) << shift; shift += 7
+                                                    if not (b & 0x80): break
+                                                result[fid] = val
+                                            elif wt == 2:  # length-delimited
+                                                ln, shift = 0, 0
+                                                while i < n:
+                                                    b = data[i]; i += 1
+                                                    ln |= (b & 0x7F) << shift; shift += 7
+                                                    if not (b & 0x80): break
+                                                raw_data = data[i:i+ln]; i += ln
+                                                try:
+                                                    result[fid] = raw_data.decode('utf-8')
+                                                except:
+                                                    result[fid] = raw_data.hex()
+                                            elif wt == 5:
+                                                i += 4
+                                            elif wt == 1:
+                                                i += 8
+                                            else:
+                                                break
+                                        except:
+                                            break
+                                    return result
+
+                                pf = decode_proto(raw)
+                                # Field mapping: 1=clanId, 2=clanName, 5=activityScore, 
+                                # 6=memberCount, 7=clanLevel, 8=region
+                                clan_name = pf.get(2, "N/A")
+                                activity_score = pf.get(5, 0)
+                                members = pf.get(6, 0)
+                                clan_level = pf.get(7, 0)
+                                clan_region = pf.get(8, "N/A")
+                                print(f"  [CLAN] {label}: name={clan_name}, level={clan_level}, members={members}, activityScore={activity_score}, region={clan_region}")
+                                print(f"  [CLAN] {label}: ALL fields: {pf}")
+                                break
+                    except Exception as e:
+                        pass
+            except Exception as api_err:
+                print(f"  [CLAN] {label}: GetClanInfoByClanID error: {api_err}")
+
+            # ── Method 2: clan_compiled_data from GetLoginData (backup) ──
+            try:
+                payload = await build_major_login(conn.open_id, conn.access_token)
+                login_data = await get_login_data(payload, conn.server_url, conn.jwt)
+                if login_data:
+                    ccd = login_data.get("clan_compiled_data", "")
+                    if ccd:
+                        print(f"  [CLAN] {label}: clan_compiled_data = {len(str(ccd))} chars")
+                        ccd_str = str(ccd)
                         print(f"  [CLAN] {label}: clan data (first 100): {ccd_str[:100]}")
-                else:
-                    print(f"  [CLAN] {label}: no clan_compiled_data in response")
-                return login_data
-            else:
-                print(f"  [CLAN] {label}: GetLoginData returned empty")
+                    return login_data
+            except:
+                pass
+
         except Exception as e:
             print(f"  [CLAN] {label}: error: {e}")
         return None
