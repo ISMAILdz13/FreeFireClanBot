@@ -1508,24 +1508,28 @@ class ClanGloryBot:
         return True
 
     async def exploit_cycle(self) -> bool:
-        """Glory cycle based on reverse-engineered OB54-TCP-BOT + Muraxlee reference.
+        """Simplified glory cycle matching the proven reference bot (Muraxlee).
+        
+        The reference bot does NOT detect f2=18 or send join_match packets.
+        It simply: joins squad → spams field 9 → waits → leaves → repeats.
+        The server auto-places accounts in the match when they're ready.
+        
+        Our previous version was over-engineered with match detection and
+        join_match (field 1=3, type 0e15) which may have INTERFERED with
+        the server's match placement, preventing glory registration.
         
         Proven workflow:
         1. Form squad (OpEnSq + join)
-        2. ALL bots spam field 1=9 on ONLINE channel (17s, 0.2s delay)
+        2. Spam field 1=9 on ONLINE channel (17s, 0.2s delay)
         3. Background keepalive_loop sends field 99 every 15s on BOTH channels
-        4. Read both channels for match packet (f2=18)
-        5. Wait up to 80s for match
-        6. Leave squad and repeat
-        
-        CRITICAL: Keepalive (field 99) runs as a background task started in
-        connect_tcp(). It sends on BOTH channels (online: 0515, chat: 1215)
-        every 15 seconds. This prevents the 15-30s server idle timeout.
+        4. Wait 25s for match to complete (server auto-places + auto-eliminates)
+        5. Leave squad and repeat
         """
         await self.form_squad()
         await asyncio.sleep(2)
 
         # Build field-9 spam packet for each connection
+        # Reference bot uses field 2.1 = account_uid (NOT hardcoded 12480598706)
         spam_packets = {}
         for conn in self.connections:
             if conn.connected:
@@ -1536,145 +1540,35 @@ class ClanGloryBot:
 
         SPAM_DURATION = 17
         SPAM_DELAY = 0.2
-        MATCH_WAIT = 80
-        deadline = asyncio.get_event_loop().time() + SPAM_DURATION + MATCH_WAIT
 
-        # ── PHASE 1: Spam field 1=9 on ONLINE channel (17s) ──
+        # ── Spam field 1=9 on ONLINE channel (17s) ──
         print(f"  >> Spam field=9 on ONLINE ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
-        async def spam_phase(conns, duration, delay):
-            end_time = asyncio.get_event_loop().time() + duration
-            sent = 0
-            while asyncio.get_event_loop().time() < end_time:
-                for conn in conns:
-                    if not conn.connected or conn.match_found:
-                        continue
-                    pkt = spam_packets.get(conn.index)
-                    if pkt:
-                        if await conn.send_packet(pkt, channel="online"):
-                            sent += 1
-                await asyncio.sleep(delay)
-            return sent
-
-        # ── Read both channels for match (f2=18) ──
-        async def read_channel(conn, channel_name, reader, deadline):
-            label = f"G{conn.index+1}/{channel_name}"
-            while asyncio.get_event_loop().time() < deadline:
-                if conn.match_found:
-                    break
-                try:
-                    resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
-                    if not resp:
-                        conn.connected = False
-                        print(f"  [{label}] connection closed")
-                        break
-                    conn.reset_ka_watchdog()  # got data, reset watchdog
-                    resp_hex = resp.hex()
-                    if len(resp_hex) > 40:
-                        print(f"  [{label}] DATA: {len(resp_hex)} hex, header={resp_hex[:16]}")
-                    for skip in [10, 8, 12, 6, 4, 0, 14, 16, 18, 20, 2, 22, 24]:
-                        try:
-                            payload = resp_hex[skip:]
-                            if len(payload) < 20:
-                                continue
-                            try:
-                                decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
-                                if decrypted:
-                                    json_str = await DeCode_PackEt(decrypted)
-                                    if json_str:
-                                        parsed = json.loads(json_str)
-                                        f2 = parsed.get('2', {})
-                                        f2_val = f2.get('data') if isinstance(f2, dict) else f2
-                                        if isinstance(f2_val, int) and f2_val == 18 and not conn.match_found:
-                                            f5 = parsed.get('5', {})
-                                            f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
-                                            group_id = None
-                                            if isinstance(f5d, dict):
-                                                f1_5 = f5d.get('1', {})
-                                                if isinstance(f1_5, dict) and 'data' in f1_5:
-                                                    group_id = f1_5['data']
-                                            if group_id and isinstance(group_id, int) and group_id > 1000000000:
-                                                print(f"  [{label}] MATCH FOUND! (decrypted) GroupID={group_id}")
-                                                conn.match_found = True
-                                                conn.match_data = parsed
-                                                await conn.join_match(group_id)
-                            except:
-                                pass
-                            json_str = await DeCode_PackEt(payload)
-                            if not json_str:
-                                continue
-                            parsed = json.loads(json_str)
-                            f2 = parsed.get('2', {})
-                            f2_val = f2.get('data') if isinstance(f2, dict) else f2
-                            if not isinstance(f2_val, int) or f2_val < 1:
-                                continue
-                            if f2_val == 18 and not conn.match_found:
-                                f5 = parsed.get('5', {})
-                                f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
-                                group_id = None
-                                if isinstance(f5d, dict):
-                                    f1_5 = f5d.get('1', {})
-                                    if isinstance(f1_5, dict) and 'data' in f1_5:
-                                        group_id = f1_5['data']
-                                if group_id and isinstance(group_id, int) and group_id > 1000000000:
-                                    print(f"  [{label}] MATCH FOUND! GroupID={group_id}")
-                                    conn.match_found = True
-                                    conn.match_data = parsed
-                                    await conn.join_match(group_id)
-                            break
-                        except:
-                            continue
-                except asyncio.TimeoutError:
+        end_time = asyncio.get_event_loop().time() + SPAM_DURATION
+        spam_count = 0
+        while asyncio.get_event_loop().time() < end_time:
+            for conn in self.connections:
+                if not conn.connected:
                     continue
-                except Exception as e:
-                    print(f"  [{label}] read error: {e}")
-                    conn.connected = False
-                    break
+                pkt = spam_packets.get(conn.index)
+                if pkt:
+                    if await conn.send_packet(pkt, channel="online"):
+                        spam_count += 1
+            await asyncio.sleep(SPAM_DELAY)
 
-        # Run spam + reads concurrently
-        read_tasks = []
-        for conn in self.connections:
-            if not conn.connected:
-                continue
-            read_tasks.append(read_channel(conn, "online", conn.online_reader, deadline))
-            read_tasks.append(read_channel(conn, "chat", conn.chat_reader, deadline))
-
-        all_tasks = [spam_phase(self.connections, SPAM_DURATION, SPAM_DELAY)] + read_tasks
-        results = await asyncio.gather(*all_tasks, return_exceptions=True)
-
-        spam_count = results[0] if isinstance(results[0], int) else 0
         alive_count = sum(1 for c in self.connections if c.connected)
         print(f"  >> Spam: {spam_count} pkts, {alive_count} alive")
 
-        # Share GroupID
-        match_finders = [c for c in self.connections if c.match_found and c.match_data]
-        if match_finders:
-            for finder in match_finders:
-                f5 = finder.match_data.get('5', {})
-                f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
-                shared_group_id = None
-                if isinstance(f5d, dict):
-                    f1 = f5d.get('1', {})
-                    if isinstance(f1, dict) and 'data' in f1:
-                        shared_group_id = f1['data']
-                if shared_group_id:
-                    for conn in self.connections:
-                        if conn.connected and not conn.match_found:
-                            print(f"  [G{conn.index+1}] Joining from shared GroupID={shared_group_id}")
-                            await conn.join_match(shared_group_id)
-                            conn.match_found = True
+        # ── Wait for match to complete (server auto-places + auto-eliminates) ──
+        # The server places all "ready" accounts into the match automatically.
+        # The account loads in, gets eliminated (nobody is playing), match ends.
+        # Glory is awarded on match completion/elimination.
+        print(f"  >> Waiting {MATCH_WAIT_AFTER}s for match to complete...")
+        await asyncio.sleep(MATCH_WAIT_AFTER)
 
-        matches = sum(1 for c in self.connections if c.match_found)
-        print(f"  >> {matches} match(es), {alive_count} alive")
+        alive_count = sum(1 for c in self.connections if c.connected)
+        print(f"  >> After wait: {alive_count} alive")
 
-        # Wait for match to register on server side before leaving
-        # The server awards glory when the match completes or the player is eliminated.
-        # The account auto-loads into the match server-side when we join (GroupID).
-        # We must wait ~25s for the match to start and the server to register participation.
-        if matches > 0:
-            print(f"  >> Waiting {MATCH_WAIT_AFTER}s for match to register on server...")
-            await asyncio.sleep(MATCH_WAIT_AFTER)
-
-        # Leave squad
+        # ── Leave squad ──
         for conn in self.connections:
             if conn.connected:
                 try:
@@ -1688,7 +1582,7 @@ class ClanGloryBot:
                     pass
 
         await asyncio.sleep(CYCLE_DELAY)
-        return matches > 0
+        return alive_count > 0
 
     async def run(self):
         """Main exploit loop."""

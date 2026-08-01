@@ -423,7 +423,7 @@ class TestBotConfigurationConstants(unittest.TestCase):
         with open(bot_path) as f:
             source = f.read()
         self.assertIn("asyncio.gather", source)
-        self.assertIn("read_channel", source)
+        self.assertIn("SPAM_DURATION", source)
 
 
 class TestConnectionMatchState(unittest.TestCase):
@@ -528,22 +528,6 @@ class TestConnectionMatchState(unittest.TestCase):
         packet2 = await GeneRaTePk(proto2.hex(), "0515", conn2.key, conn2.iv)
         self.assertNotEqual(packet1, packet2)
 
-    async def test_read_channel_sets_connected_false_on_empty_resp(self):
-        """FIX: read_channel should set connected=False on empty response."""
-        conn = GuestConnection({"uid": "123", "password": "x", "open_id": "oid", "access_token": "tok"}, 0)
-        conn.connected = True
-        reader = AsyncMock()
-        reader.read.return_value = b""
-        conn.online_reader = reader
-        result = await conn.read_channel("online", 1.0)
-        self.assertIsNone(result)
-        self.assertFalse(conn.connected)
-
-    # ── SPAM AGGRESSION FIXES ──────────────────────────
-
-
-    # ── NEW GLORY BOT LOGIC TESTS ──────────────────────
-
     async def test_squad_size_is_3_not_4(self):
         """FIX 30: Squad should open with 2 extra slots (3 total), not 4."""
         import inspect
@@ -600,14 +584,6 @@ class TestConnectionMatchState(unittest.TestCase):
         self.assertIn("keepalive_loop", source, "Should start keepalive_loop task")
         self.assertIn("TCP_KEEPIDLE", source, "Should set TCP_KEEPIDLE")
 
-    async def test_exploit_cycle_spam_field9(self):
-        """exploit_cycle should spam field 1=9 on online channel."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("1: 9", source, "Should use field 1=9 for spam")
-        self.assertIn("SPAM_DELAY", source, "Should have configurable delay")
-        self.assertNotIn("269", source, "Should NOT use field 269")
-
     async def test_no_field_269_anywhere(self):
         """Field 269 (fake opcode) should not appear in exploit_cycle."""
         import inspect
@@ -624,3 +600,37 @@ class TestConnectionMatchState(unittest.TestCase):
         self.assertIn("_last_data_time", source, "Should use timestamp-based watchdog")
         self.assertIn("120", source, "Should use 120s threshold")
         self.assertNotIn("_ka_silent_count", source, "Should NOT use old counter")
+
+
+    # ── SIMPLIFIED EXPLOIT_CYCLE TESTS ──────────────────
+
+    async def test_exploit_cycle_simple_spam_wait_leave(self):
+        """exploit_cycle should follow: spam → wait → leave (no match detection)."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("1: 9", source, "Should spam field 1=9")
+        self.assertIn("SPAM_DURATION", source, "Should have spam duration")
+        self.assertIn("MATCH_WAIT_AFTER", source, "Should wait after spam")
+        self.assertIn("ExiT", source, "Should leave squad")
+
+    async def test_exploit_cycle_no_join_match(self):
+        """exploit_cycle should NOT send join_match (field 1=3, type 0e15)."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertNotIn("join_match", source, "Should NOT call join_match")
+        self.assertNotIn("0e15", source, "Should NOT use 0e15 packet type")
+
+    async def test_exploit_cycle_no_match_detection(self):
+        """exploit_cycle should NOT detect f2=18 or read channels for match."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertNotIn("f2", source, "Should NOT parse f2 field")
+        self.assertNotIn("read_channel", source, "Should NOT read channels for match")
+        self.assertNotIn("match_found", source, "Should NOT track match_found")
+
+    async def test_exploit_cycle_uses_real_uid(self):
+        """exploit_cycle should use real account_uid, not hardcoded 12480598706."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("account_uid", source, "Should use real account UID")
+        self.assertNotIn("12480598706", source, "Should NOT use hardcoded UID")
