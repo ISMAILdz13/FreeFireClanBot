@@ -478,7 +478,7 @@ class GuestConnection:
         """Send keep-alive packet (field 1=99) on the specified channel.
         
         Online channel uses 0515 header, Chat channel uses 1215 header.
-        Interval: 15 seconds. Watchdog: 120s without any data = reconnect.
+        Interval: 15 seconds. Watchdog: 300s without any data = reconnect.
         """
         if not self.connected:
             return False
@@ -504,15 +504,15 @@ class GuestConnection:
     async def keepalive_loop(self, stop_event=None):
         """Background keepalive: field 99 every 15s on BOTH channels.
         
-        Watchdog: if no data received for 120s (2 min), force reconnect.
+        Watchdog: if no data received for 300s (5 min), force reconnect.
         This is a SAFETY NET, not the primary connection keeper.
         """
         while self.connected and (stop_event is None or not stop_event.is_set()):
             await self.send_keepalive(channel="online")
             await self.send_keepalive(channel="chat")
-            # Watchdog check: 120s without ANY data = dead connection
-            if time.time() - getattr(self, '_last_data_time', time.time()) > 120:
-                print(f"  [G{self.index+1}] Watchdog: no data for 120s, reconnecting")
+            # Watchdog check: 300s without ANY data = dead connection
+            if time.time() - getattr(self, "_last_data_time", time.time()) > 300:
+                print(f"  [G{self.index+1}] Watchdog: no data for 300s, reconnecting")
                 self.connected = False
                 break
             await asyncio.sleep(15)
@@ -914,6 +914,37 @@ class GuestConnection:
             packet = await GeneRaTePk(proto_hex, "0e15", self.key, self.iv)
             await self.send_packet(packet, channel="online")
             print(f"  [G{self.index+1}] Match join sent (GroupID={group_id}, type=0e15)")
+            # Read immediate response from server (might contain battle server IP/port)
+            for ch_name, reader in [("online", self.online_reader), ("chat", self.chat_reader)]:
+                try:
+                    resp = await asyncio.wait_for(reader.read(9999), timeout=2.0)
+                    if resp:
+                        resp_hex = resp.hex()
+                        print(f"  [G{self.index+1}] 0e15 RESPONSE ({ch_name}): {len(resp_hex)} hex, raw={resp_hex[:200]}")
+                        # Try to decode
+                        try:
+                            ascii_resp = bytes.fromhex(resp_hex).decode('ascii', errors='replace')
+                            # Look for IP addresses (x.x.x.x pattern)
+                            import re
+                            ips = re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', ascii_resp)
+                            if ips:
+                                print(f"  [G{self.index+1}] *** FOUND IPs in response: {ips}")
+                            # Look for port numbers
+                            json_starts = [i for i in range(len(ascii_resp)) if ascii_resp[i] == '{']
+                            for js in json_starts[:3]:
+                                try:
+                                    je = ascii_resp.index('}', js)
+                                    j = ascii_resp[js:je+1]
+                                    if 'port' in j.lower() or 'ip' in j.lower() or 'server' in j.lower() or 'battle' in j.lower():
+                                        print(f"  [G{self.index+1}] *** BATTLE SERVER INFO: {j[:200]}")
+                                except:
+                                    pass
+                        except:
+                            pass
+                except asyncio.TimeoutError:
+                    pass
+                except Exception as e:
+                    print(f"  [G{self.index+1}] 0e15 response read error ({ch_name}): {e}")
             await asyncio.sleep(0.5)
             # Chat channel join (type 1215) — SIMPLER fields per reference bot
             # join_room_chanel uses: 1=3, 2={1=room_id, 2=3, 3="en"}
@@ -1959,6 +1990,11 @@ class ClanGloryBot:
                                                 if isinstance(f51, dict) and 'data' in f51:
                                                     gid = f51['data']
                                                     if int(gid) > 1000000 and not match_found:
+                                                        # Check if this is a RoomRecruit broadcast
+                                                        f58_str = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else str(f5d.get('8', ''))
+                                                        if 'RoomRecruit' in f58_str:
+                                                            print(f"  >> [SKIP] RoomRecruit in spam (GID={gid})")
+                                                            break
                                                         match_found = True
                                                         print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
                                                         for c in self.connections:
@@ -2010,6 +2046,20 @@ class ClanGloryBot:
                         data_hex = data.hex()
                         if len(data_hex) > 100:
                             print(f"  [G{conn.index+1}/{ch_name}] DATA: {len(data_hex)} hex")
+                        # Extract and log ANY JSON content in the packet
+                        try:
+                            ascii_raw = bytes.fromhex(data_hex).decode('ascii', errors='replace')
+                            json_starts = [i for i in range(len(ascii_raw)) if ascii_raw[i] == '{']
+                            for js in json_starts[:3]:
+                                try:
+                                    je = ascii_raw.index('}', js)
+                                    json_str = ascii_raw[js:je+1]
+                                    if len(json_str) > 10 and ('GroupID' in json_str or 'RoomId' in json_str or 'gameMode' in json_str or 'type' in json_str or 'Match' in json_str):
+                                        print(f"    [json] G{conn.index+1}/{ch_name}: {json_str[:200]}")
+                                except:
+                                    pass
+                        except:
+                            pass
                         # Try to parse for f2=18 match-found packet
                         for skip in range(0, min(30, len(data_hex)//2)):
                             if match_state["found"]:
@@ -2064,7 +2114,22 @@ class ClanGloryBot:
                                                 if isinstance(f51, dict) and 'data' in f51:
                                                     gid = f51['data']
                                                     if int(gid) > 1000000:
-                                                        # FIRST match found — lock it
+                                                        # Check if this is a RoomRecruit broadcast (NOT a real match)
+                                                        f58_str = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else str(f5d.get('8', ''))
+                                                        if 'RoomRecruit' in f58_str:
+                                                            print(f"  >> [SKIP] RoomRecruit broadcast (GID={gid}, owner={f58_str[:60]})")
+                                                            break
+                                                        # Check gameMode — only CS (gameMode=15) is valid
+                                                        import json as _json
+                                                        try:
+                                                            room_json = _json.loads(f58_str) if f58_str.startswith('{') else {}
+                                                            gm = room_json.get('gameMode', 0)
+                                                            if gm != 15:
+                                                                print(f"  >> [SKIP] Wrong gameMode={gm} (GID={gid}), only CS(15) wanted")
+                                                                break
+                                                        except:
+                                                            pass
+                                                        # FIRST REAL match found — lock it
                                                         match_state["found"] = True
                                                         match_state["gid"] = gid
                                                         print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
