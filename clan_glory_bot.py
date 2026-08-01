@@ -1431,8 +1431,8 @@ class ClanGloryBot:
                                                 v = f5d[k]
                                                 if isinstance(v, dict) and 'data' in v:
                                                     print(f"    5.{k} = {str(v['data'])[:100]}")
-                                            # If f2=18 (match found), join the match immediately
-                                            if f2_val == 18 and match_group_id:
+                                            # If f2=18 with a REAL GroupID (not status ID like 100001)
+                                            if f2_val == 18 and match_group_id and int(match_group_id) > 1000000:
                                                 print(f"  >> MATCH FOUND! GroupID={match_group_id}")
                                                 print(f"  >> Joining match for all connections...")
                                                 for conn in self.connections:
@@ -1441,6 +1441,8 @@ class ClanGloryBot:
                                                         conn.match_found = True
                                                         conn.match_data = parsed
                                                         await asyncio.sleep(0.5)
+                                            elif f2_val == 18:
+                                                print(f"  >> f2=18 squad status (GroupID={match_group_id} — not a real match, skipping)")
                                     verified = True
                                     break
                         except:
@@ -1707,62 +1709,126 @@ class ClanGloryBot:
             if not leader.connected:
                 break
             
-            # Check for match-found packet on chat channel (non-blocking)
-            try:
-                data = await asyncio.wait_for(leader.chat_reader.read(9999), timeout=0.3)
-                if data:
-                    data_hex = data.hex()
-                    # Try to parse for f2=18 match-found packet
-                    for skip in [10, 8, 12, 6, 14, 4, 0, 16, 18]:
-                        try:
-                            payload = data_hex[skip:]
-                            if len(payload) < 20:
+            # Check for match-found packet on ALL chat channels (non-blocking)
+            for conn in self.connections:
+                if not conn.connected:
+                    continue
+                try:
+                    data = await asyncio.wait_for(conn.chat_reader.read(9999), timeout=0.1)
+                    if data:
+                        conn.reset_ka_watchdog()
+                        data_hex = data.hex()
+                        if len(data_hex) > 100:
+                            print(f"  [G{conn.index+1}/chat] DATA: {len(data_hex)} hex")
+                        for skip in [10, 8, 12, 6, 14, 4, 0, 16, 18]:
+                            try:
+                                payload = data_hex[skip:]
+                                if len(payload) < 20:
+                                    continue
+                                json_str = await DeCode_PackEt(payload)
+                                if json_str:
+                                    parsed = json.loads(json_str)
+                                    f2 = parsed.get('2', {})
+                                    f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                                    if isinstance(f2_val, int) and f2_val == 18:
+                                        f5 = parsed.get('5', {})
+                                        if isinstance(f5, dict) and 'data' in f5:
+                                            f5d = f5['data']
+                                            if isinstance(f5d, dict):
+                                                f51 = f5d.get('1', {})
+                                                if isinstance(f51, dict) and 'data' in f51:
+                                                    gid = f51['data']
+                                                    if int(gid) > 1000000:
+                                                        print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/chat)")
+                                                        match_found = True
+                                                        for c in self.connections:
+                                                            if c.connected:
+                                                                await c.join_match(gid)
+                                                                c.match_found = True
+                                                                await asyncio.sleep(0.5)
+                                                        break
+                                            break
+                            except:
                                 continue
-                            json_str = await DeCode_PackEt(payload)
-                            if json_str:
-                                parsed = json.loads(json_str)
-                                f2 = parsed.get('2', {})
-                                f2_val = f2.get('data') if isinstance(f2, dict) else f2
-                                if isinstance(f2_val, int) and f2_val == 18:
-                                    f5 = parsed.get('5', {})
-                                    if isinstance(f5, dict) and 'data' in f5:
-                                        f5d = f5['data']
-                                        if isinstance(f5d, dict):
-                                            f51 = f5d.get('1', {})
-                                            if isinstance(f51, dict) and 'data' in f51:
-                                                match_group_id = f51['data']
-                                                print(f"  >> MATCH FOUND! GroupID={match_group_id}")
-                                                match_found = True
-                                                # Join match for all connections immediately
-                                                for conn in self.connections:
-                                                    if conn.connected:
-                                                        await conn.join_match(match_group_id)
-                                                        conn.match_found = True
-                                                        await asyncio.sleep(0.5)
-                                                break  # stop parsing
-                                    break
-                        except:
-                            continue
                     if match_found:
-                        break  # stop spamming, match is found
-            except asyncio.TimeoutError:
-                pass
-            except Exception:
-                pass
+                        break
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    pass
+            if match_found:
+                break  # stop spamming, match is found
             
             await asyncio.sleep(SPAM_DELAY)
 
         alive_count = sum(1 for c in self.connections if c.connected)
         print(f"  >> Spam: {spam_count} pkts, {alive_count} alive, match={'FOUND' if match_found else 'no'}")
 
-        # If match was found during spam, wait for it to complete
-        if match_found:
-            print(f"  >> Match joined, waiting 40s for match to complete...")
-            await asyncio.sleep(40)
-        else:
-            # No match found — still wait in case server auto-places
-            print(f"  >> No match found, waiting 40s anyway...")
-            await asyncio.sleep(40)
+        # ── Wait phase: actively read ALL channels for match-found packets ──
+        # The real match packet (f2=18 with large GroupID) often arrives
+        # AFTER the spam phase, during the wait period.
+        WAIT_DURATION = 40
+        print(f"  >> Waiting {WAIT_DURATION}s (reading all channels for match packets)...")
+        wait_end = asyncio.get_event_loop().time() + WAIT_DURATION
+        
+        async def read_for_match(conn, reader, ch_name, deadline):
+            """Continuously read from a channel looking for f2=18 match packets."""
+            while asyncio.get_event_loop().time() < deadline and conn.connected:
+                try:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+                    data = await asyncio.wait_for(reader.read(9999), timeout=min(remaining, 2.0))
+                    if data:
+                        conn.reset_ka_watchdog()
+                        data_hex = data.hex()
+                        if len(data_hex) > 100:
+                            print(f"  [G{conn.index+1}/{ch_name}] DATA: {len(data_hex)} hex")
+                        # Try to parse for f2=18 match-found packet
+                        for skip in [10, 8, 12, 6, 14, 4, 0, 16, 18]:
+                            try:
+                                payload = data_hex[skip:]
+                                if len(payload) < 20:
+                                    continue
+                                json_str = await DeCode_PackEt(payload)
+                                if json_str:
+                                    parsed = json.loads(json_str)
+                                    f2 = parsed.get('2', {})
+                                    f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                                    if isinstance(f2_val, int) and f2_val == 18:
+                                        f5 = parsed.get('5', {})
+                                        if isinstance(f5, dict) and 'data' in f5:
+                                            f5d = f5['data']
+                                            if isinstance(f5d, dict):
+                                                f51 = f5d.get('1', {})
+                                                if isinstance(f51, dict) and 'data' in f51:
+                                                    gid = f51['data']
+                                                    if int(gid) > 1000000:
+                                                        print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
+                                                        match_found = True
+                                                        for c in self.connections:
+                                                            if c.connected:
+                                                                await c.join_match(gid)
+                                                                c.match_found = True
+                                                                await asyncio.sleep(0.5)
+                                                        return  # match found, stop reading
+                                                    # else: small GroupID = squad status, ignore
+                                    break
+                            except:
+                                continue
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    break
+        
+        # Launch concurrent readers on ALL connections, BOTH channels
+        wait_tasks = []
+        for conn in self.connections:
+            if conn.connected:
+                wait_tasks.append(read_for_match(conn, conn.online_reader, "online", wait_end))
+                wait_tasks.append(read_for_match(conn, conn.chat_reader, "chat", wait_end))
+        if wait_tasks:
+            await asyncio.gather(*wait_tasks, return_exceptions=True)
 
         alive_count = sum(1 for c in self.connections if c.connected)
         print(f"  >> After wait: {alive_count} alive")
