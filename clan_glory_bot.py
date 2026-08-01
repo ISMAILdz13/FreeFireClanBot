@@ -76,6 +76,7 @@ SPAM_DELAY         = 1.0
 MATCH_WAIT         = 60
 LEAVE_DELAY        = 2.0
 CYCLE_DELAY        = 3.0
+MATCH_WAIT_AFTER   = 25  # seconds to wait in match before leaving (for glory)
 RECONNECT_DELAY    = 3
 PACKET_INTERVAL    = 0.5
 
@@ -1665,6 +1666,14 @@ class ClanGloryBot:
         matches = sum(1 for c in self.connections if c.match_found)
         print(f"  >> {matches} match(es), {alive_count} alive")
 
+        # Wait for match to register on server side before leaving
+        # The server awards glory when the match completes or the player is eliminated.
+        # The account auto-loads into the match server-side when we join (GroupID).
+        # We must wait ~25s for the match to start and the server to register participation.
+        if matches > 0:
+            print(f"  >> Waiting {MATCH_WAIT_AFTER}s for match to register on server...")
+            await asyncio.sleep(MATCH_WAIT_AFTER)
+
         # Leave squad
         for conn in self.connections:
             if conn.connected:
@@ -1694,7 +1703,7 @@ class ClanGloryBot:
         if self.solo_mode:
             print(f"  Mode: SOLO (independent matchmaking)")
         print(f"  Join delay: {self.join_delay}s")
-        cycle_time = SPAM_DURATION + MATCH_WAIT + int(CYCLE_DELAY)
+        cycle_time = SPAM_DURATION + MATCH_WAIT + MATCH_WAIT_AFTER + int(CYCLE_DELAY)
         print(f"  Per cycle: ~{cycle_time}s")
         print(f"  Est total time: ~{(self.max_cycles * cycle_time) // 60} min")
         print("=" * 60)
