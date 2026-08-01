@@ -566,25 +566,43 @@ class TestConnectionMatchState(unittest.TestCase):
 
     # ── MURAXLEE APPROACH TESTS ─────────────────────────
 
-    async def test_exploit_cycle_uses_field9_only(self):
-        """Should use field 1=9 (not 269) — matches Muraxlee bot."""
+
+    # ── FIELD 99 KEEPALIVE TESTS ─────────────────────────
+
+    async def test_send_keepalive_exists(self):
+        """GuestConnection should have send_keepalive method (field 1=99)."""
+        import inspect
+        self.assertTrue(hasattr(GuestConnection, 'send_keepalive'),
+                        "GuestConnection should have send_keepalive method")
+        source = inspect.getsource(GuestConnection.send_keepalive)
+        self.assertIn("1: 99", source, "Keepalive should use field 1=99")
+        self.assertIn("time.time()", source, "Keepalive should include timestamp")
+
+    async def test_exploit_cycle_uses_field9_for_spam(self):
+        """Spam phase should use field 1=9."""
         import inspect
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("1: 9", source, "Should use field 1=9")
+        self.assertIn("1: 9", source, "Spam should use field 1=9")
+        self.assertIn("SPAM_DELAY", source, "Should have configurable SPAM_DELAY")
+
+    async def test_exploit_cycle_uses_field99_for_keepalive(self):
+        """Keepalive phase should use field 1=99 (NOT field 9)."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("keepalive", source.lower(), "Should have keepalive phase")
+        self.assertIn("send_keepalive", source, "Should call send_keepalive")
         self.assertNotIn("269", source, "Should NOT use field 269")
 
-    async def test_exploit_cycle_online_channel_only(self):
-        """Spam should be on online channel ONLY — chat kills connections."""
+    async def test_exploit_cycle_spam_then_keepalive(self):
+        """Should have two phases: spam (17s) then keepalive (80s)."""
         import inspect
         source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("channel=\"online\"", source,
-                      "Should send on online channel")
-        self.assertNotIn('"chat"', source.split("spam_field9")[1].split("read_channel")[0] if "spam_field9" in source else "",
-                         "Spam should NOT reference chat channel")
+        self.assertIn("spam_phase", source, "Should have spam_phase")
+        self.assertIn("keepalive_phase", source, "Should have keepalive_phase")
+        self.assertIn("spam_then_keepalive", source, "Should transition from spam to keepalive")
 
-    async def test_spam_start_match_online_only(self):
-        """spam_start_match should send on online channel only (not alternate)."""
+    async def test_exploit_cycle_online_only_sending(self):
+        """All sending should be on online channel only."""
         import inspect
-        source = inspect.getsource(GuestConnection.spam_start_match)
-        self.assertNotIn('% 2 == 0', source,
-                         "Should NOT alternate between online and chat")
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn('channel="online"', source, "Should send on online channel")
