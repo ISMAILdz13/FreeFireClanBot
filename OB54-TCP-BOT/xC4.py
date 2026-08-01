@@ -101,7 +101,7 @@ async def DeCode_PackEt(input_text):
         json_data = json.dumps(parsed_results_dict)
         return json_data
     except Exception as e:
-        print(f"error {e}")
+        pass  # suppress — offset scanning tries many invalid payloads
         return None
                       
 def xMsGFixinG(n):

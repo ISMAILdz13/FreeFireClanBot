@@ -59,6 +59,9 @@ from xC4 import (
     CrEaTe_ProTo, EnC_PacKeT_sync, GeneRaTePk, DecodE_HeX,
     AuthClan, OpEnSq, AutH_GlobAl, ExiT,
     DeCode_PackEt, DEc_PacKeT, GeTSQDaTa,
+    # Note: DeCode_PackEt prints "error Invalid hex format" on failure.
+    # We call it hundreds of times at different offsets — most fail.
+    # Use _silent_decode below to suppress the noise.
     EnC_PacKeT, EnC_Uid, EnC_Vr, SEnd_InV,
     GenJoinSquadsPacket,
 )
@@ -606,7 +609,7 @@ class GuestConnection:
                             payload_data = await DEc_PacKeT(payload, self.key, self.iv)
                             if not payload_data:
                                 continue
-                        json_str = await DeCode_PackEt(payload_data)
+                        json_str = await _silent_decode(payload_data)
                         if not json_str:
                             continue
                         packet_json = json.loads(json_str)
@@ -654,7 +657,7 @@ class GuestConnection:
             if len(payload) < 20:
                 break
             try:
-                json_str = await DeCode_PackEt(payload)
+                json_str = await _silent_decode(payload)
                 if not json_str:
                     continue
                 packet_json = json.loads(json_str)
@@ -696,7 +699,7 @@ class GuestConnection:
             if len(payload) < 20:
                 break
             try:
-                json_str = await DeCode_PackEt(payload)
+                json_str = await _silent_decode(payload)
                 if json_str:
                     packet_json = json.loads(json_str)
                     try:
@@ -1170,7 +1173,7 @@ class ClanGloryBot:
                         try:
                             decrypted = await DEc_PacKeT(payload, leader.key, leader.iv)
                             if decrypted:
-                                json_str = await DeCode_PackEt(decrypted)
+                                json_str = await _silent_decode(decrypted)
                                 if json_str:
                                     parsed = json.loads(json_str)
                                     f5 = parsed.get('5', {})
@@ -1192,7 +1195,7 @@ class ClanGloryBot:
                             pass
                         # Try raw decode
                         try:
-                            json_str = await DeCode_PackEt(payload)
+                            json_str = await _silent_decode(payload)
                             if json_str:
                                 parsed = json.loads(json_str)
                                 f5 = parsed.get('5', {})
@@ -1363,7 +1366,7 @@ class ClanGloryBot:
                             try:
                                 decrypted = await DEc_PacKeT(payload, leader.key, leader.iv)
                                 if decrypted:
-                                    json_str = await DeCode_PackEt(decrypted)
+                                    json_str = await _silent_decode(decrypted)
                                     if json_str:
                                         parsed = json.loads(json_str)
                                         f2 = parsed.get('2', {})
@@ -1399,7 +1402,7 @@ class ClanGloryBot:
                             except:
                                 pass
                             # Try raw decode
-                            json_str = await DeCode_PackEt(payload)
+                            json_str = await _silent_decode(payload)
                             if json_str:
                                 parsed = json.loads(json_str)
                                 f2 = parsed.get('2', {})
@@ -1496,7 +1499,7 @@ class ClanGloryBot:
                             payload = resp_hex[skip:]
                             if len(payload) < 20:
                                 continue
-                            json_str = await DeCode_PackEt(payload)
+                            json_str = await _silent_decode(payload)
                             if not json_str:
                                 continue
                             parsed = json.loads(json_str)
@@ -1730,14 +1733,14 @@ class ClanGloryBot:
                                 try:
                                     decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
                                     if decrypted:
-                                        json_str = await DeCode_PackEt(decrypted)
+                                        json_str = await _silent_decode(decrypted)
                                         if json_str:
                                             parsed = json.loads(json_str)
                                 except:
                                     pass
                                 if not parsed:
                                     try:
-                                        json_str = await DeCode_PackEt(payload)
+                                        json_str = await _silent_decode(payload)
                                         if json_str:
                                             parsed = json.loads(json_str)
                                     except:
@@ -1753,9 +1756,10 @@ class ClanGloryBot:
                                                 f51 = f5d.get('1', {})
                                                 if isinstance(f51, dict) and 'data' in f51:
                                                     gid = f51['data']
-                                                    if int(gid) > 1000000:
-                                                        print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/chat)")
+                                                    if int(gid) > 1000000 and not match_found:
                                                         match_found = True
+                                                        print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/chat)")
+                                                        print(f"  >> Joining match for all connections...")
                                                         for c in self.connections:
                                                             if c.connected:
                                                                 await c.join_match(gid)
@@ -1783,12 +1787,17 @@ class ClanGloryBot:
         # The real match packet (f2=18 with large GroupID) often arrives
         # AFTER the spam phase, during the wait period.
         WAIT_DURATION = 50
+        # Use a shared dict as mutable flag — avoids Python scoping issues
+        # where match_found in nested functions becomes a local variable
+        match_state = {"found": match_found, "gid": None}
         print(f"  >> Waiting {WAIT_DURATION}s (reading all channels for match packets)...")
         wait_end = asyncio.get_event_loop().time() + WAIT_DURATION
         
         async def read_for_match(conn, reader, ch_name, deadline):
             """Continuously read from a channel looking for f2=18 match packets."""
             while asyncio.get_event_loop().time() < deadline and conn.connected:
+                if match_state["found"]:
+                    return  # another reader already found a match, stop
                 try:
                     remaining = deadline - asyncio.get_event_loop().time()
                     if remaining <= 0:
@@ -1800,8 +1809,9 @@ class ClanGloryBot:
                         if len(data_hex) > 100:
                             print(f"  [G{conn.index+1}/{ch_name}] DATA: {len(data_hex)} hex")
                         # Try to parse for f2=18 match-found packet
-                        # Try ALL offsets 0-30 AND try decryption first (like old working code)
                         for skip in range(0, min(30, len(data_hex)//2)):
+                            if match_state["found"]:
+                                return  # race condition guard
                             try:
                                 payload = data_hex[skip:]
                                 if len(payload) < 20:
@@ -1811,7 +1821,7 @@ class ClanGloryBot:
                                 try:
                                     decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
                                     if decrypted:
-                                        json_str = await DeCode_PackEt(decrypted)
+                                        json_str = await _silent_decode(decrypted)
                                         if json_str:
                                             parsed = json.loads(json_str)
                                 except:
@@ -1819,7 +1829,7 @@ class ClanGloryBot:
                                 # Try raw decode if decryption failed
                                 if not parsed:
                                     try:
-                                        json_str = await DeCode_PackEt(payload)
+                                        json_str = await _silent_decode(payload)
                                         if json_str:
                                             parsed = json.loads(json_str)
                                     except:
@@ -1836,15 +1846,17 @@ class ClanGloryBot:
                                                 if isinstance(f51, dict) and 'data' in f51:
                                                     gid = f51['data']
                                                     if int(gid) > 1000000:
+                                                        # FIRST match found — lock it
+                                                        match_state["found"] = True
+                                                        match_state["gid"] = gid
                                                         print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
-                                                        match_found = True
+                                                        print(f"  >> Joining match for all connections...")
                                                         for c in self.connections:
                                                             if c.connected:
                                                                 await c.join_match(gid)
                                                                 c.match_found = True
                                                                 await asyncio.sleep(0.5)
                                                         return  # match found, stop reading
-                                                    # else: small GroupID = squad status, ignore
                                         break
                             except:
                                 continue
@@ -1861,6 +1873,14 @@ class ClanGloryBot:
                 wait_tasks.append(read_for_match(conn, conn.chat_reader, "chat", wait_end))
         if wait_tasks:
             await asyncio.gather(*wait_tasks, return_exceptions=True)
+        
+        # Update outer match_found from shared state
+        match_found = match_state["found"]
+        
+        # If match was joined, wait for the match to complete (load + auto-eliminate)
+        if match_found:
+            print(f"  >> Match joined. Waiting 40s for match to complete...")
+            await asyncio.sleep(40)
 
         alive_count = sum(1 for c in self.connections if c.connected)
         print(f"  >> After wait: {alive_count} alive")
