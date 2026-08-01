@@ -1826,10 +1826,21 @@ class ClanGloryBot:
         match_already_found = any(c.match_found for c in self.connections if c.connected)
         if match_already_found:
             print(f"  >> Match found during squad formation, skipping spam...")
-            print(f"  >> Waiting 40s for match to complete...")
-            await asyncio.sleep(40)
+            print("  >> Waiting 180s for match to complete (AFK in match)...")
+            match_wait_end = asyncio.get_event_loop().time() + 180
+            while asyncio.get_event_loop().time() < match_wait_end:
+                for c in self.connections:
+                    if c.connected:
+                        try:
+                            ka_fields = {1: 99}
+                            ka_proto = await CrEaTe_ProTo(ka_fields)
+                            ka_pkt = await GeneRaTePk(ka_proto.hex(), get_packet_type(self.region), c.key, c.iv)
+                            await c.send_packet(ka_pkt, channel="online")
+                        except:
+                            pass
+                await asyncio.sleep(15)
             alive_count = sum(1 for c in self.connections if c.connected)
-            print(f"  >> After wait: {alive_count} alive")
+            print(f"  >> After match wait: {alive_count} alive")
             # Read any remaining packets on all channels
             for conn in self.connections:
                 if not conn.connected:
@@ -1990,13 +2001,11 @@ class ClanGloryBot:
                                                 if isinstance(f51, dict) and 'data' in f51:
                                                     gid = f51['data']
                                                     if int(gid) > 1000000 and not match_found:
-                                                        # Check if this is a RoomRecruit broadcast
-                                                        f58_str = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else str(f5d.get('8', ''))
-                                                        if 'RoomRecruit' in f58_str:
-                                                            print(f"  >> [SKIP] RoomRecruit in spam (GID={gid})")
-                                                            break
                                                         match_found = True
+                                                        f58_str = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else str(f5d.get('8', ''))
                                                         print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
+                                                        if f58_str:
+                                                            print(f"  >> Match info: {f58_str[:200]}")
                                                         for c in self.connections:
                                                             if c.connected:
                                                                 await c.join_match(gid)
@@ -2114,25 +2123,13 @@ class ClanGloryBot:
                                                 if isinstance(f51, dict) and 'data' in f51:
                                                     gid = f51['data']
                                                     if int(gid) > 1000000:
-                                                        # Check if this is a RoomRecruit broadcast (NOT a real match)
-                                                        f58_str = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else str(f5d.get('8', ''))
-                                                        if 'RoomRecruit' in f58_str:
-                                                            print(f"  >> [SKIP] RoomRecruit broadcast (GID={gid}, owner={f58_str[:60]})")
-                                                            break
-                                                        # Check gameMode — only CS (gameMode=15) is valid
-                                                        import json as _json
-                                                        try:
-                                                            room_json = _json.loads(f58_str) if f58_str.startswith('{') else {}
-                                                            gm = room_json.get('gameMode', 0)
-                                                            if gm != 15:
-                                                                print(f"  >> [SKIP] Wrong gameMode={gm} (GID={gid}), only CS(15) wanted")
-                                                                break
-                                                        except:
-                                                            pass
-                                                        # FIRST REAL match found — lock it
+                                                        # Match found — accept ALL matches
                                                         match_state["found"] = True
                                                         match_state["gid"] = gid
+                                                        f58_str = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else str(f5d.get('8', ''))
                                                         print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
+                                                        if f58_str:
+                                                            print(f"  >> Match info: {f58_str[:200]}")
                                                         print(f"  >> Joining match for all connections...")
                                                         for c in self.connections:
                                                             if c.connected:
@@ -2174,13 +2171,26 @@ class ClanGloryBot:
         # Update outer match_found from shared state
         match_found = match_state["found"]
         
-        # If match was joined, wait for the match to complete (load + auto-eliminate)
+        # If match was joined, STAY AFK in the match for 180s (3 min for CS match)
         if match_found:
-            print(f"  >> Match joined. Waiting 40s for match to complete...")
-            await asyncio.sleep(40)
-
-        alive_count = sum(1 for c in self.connections if c.connected)
-        print(f"  >> After wait: {alive_count} alive")
+            print("  >> Match joined. Staying AFK 180s for match to complete...")
+            match_wait_end = asyncio.get_event_loop().time() + 180
+            while asyncio.get_event_loop().time() < match_wait_end:
+                for c in self.connections:
+                    if c.connected:
+                        try:
+                            ka_fields = {1: 99}
+                            ka_proto = await CrEaTe_ProTo(ka_fields)
+                            ka_pkt = await GeneRaTePk(ka_proto.hex(), get_packet_type(self.region), c.key, c.iv)
+                            await c.send_packet(ka_pkt, channel="online")
+                        except:
+                            pass
+                await asyncio.sleep(15)
+            alive_count = sum(1 for c in self.connections if c.connected)
+            print(f"  >> After match wait: {alive_count} alive")
+        else:
+            alive_count = sum(1 for c in self.connections if c.connected)
+            print(f"  >> After wait: {alive_count} alive")
 
         # ── Leave squad ──
         for conn in self.connections:
