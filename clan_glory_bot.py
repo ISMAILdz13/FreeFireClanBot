@@ -544,15 +544,15 @@ class GuestConnection:
         """OpEnSq — leader opens squad for matchmaking.
         Creates 4 total slots (leader + 3) — Clash Squad is 4v4 standard.
         Squad is OPEN/PUBLIC so random players can fill the 4th slot."""
-        extra_slots = 2  # 2 extra slots = 3 total (server fills remaining via matchmaking)
+        extra_slots = 3  # 3 extra slots = 4 total (leader + 3)
         fields = {
             1: 1,
             2: {
                 2: "\u0001",
-                3: extra_slots,  # 3 extra slots = 4 total
+                3: extra_slots,  # 4 total slots for Clash Squad 4v4
                 4: 1,
                 5: "en",
-                9: 1,  # Private squad (server fills remaining slots via matchmaking)
+                9: 0,  # PUBLIC squad — server can matchmake and fill slots
                 11: 1,
                 13: 1,
                 14: {2: 5756, 6: 11, 8: "1.126.2", 9: 2, 10: 4}
@@ -1611,44 +1611,62 @@ class ClanGloryBot:
         5. Leave squad and repeat
         """
         await self.form_squad()
-        await asyncio.sleep(2)
+        print(f"  >> Squad formed, waiting 5s for server to register squad...")
+        await asyncio.sleep(5)
 
-        # Build field-9 spam packet for each connection
-        # Reference bot uses field 2.1 = account_uid (NOT hardcoded 12480598706)
-        spam_packets = {}
-        for conn in self.connections:
-            if conn.connected:
-                fields = {1: 9, 2: {1: conn.account_uid}}
-                proto = await CrEaTe_ProTo(fields)
-                pkt_type = get_packet_type(self.region)
-                spam_packets[conn.index] = await GeneRaTePk(proto.hex(), pkt_type, conn.key, conn.iv)
+        # Only the LEADER sends field 9 (start match).
+        # Members stay quiet — non-leader field 9 may confuse the server.
+        leader = self.connections[0]  # G1 is always the leader
+        if not leader.connected:
+            print("  >> Leader not connected, aborting cycle")
+            return False
+
+        fields = {1: 9, 2: {1: leader.account_uid}}
+        proto = await CrEaTe_ProTo(fields)
+        pkt_type = get_packet_type(self.region)
+        spam_pkt = await GeneRaTePk(proto.hex(), pkt_type, leader.key, leader.iv)
 
         SPAM_DURATION = 17
         SPAM_DELAY = 0.2
 
-        # ── Spam field 1=9 on ONLINE channel (17s) ──
-        print(f"  >> Spam field=9 on ONLINE ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
+        # ── Leader spams field 1=9 on ONLINE channel (17s) ──
+        # Also listen for f2=18 (match found) on leader's chat channel
+        print(f"  >> Leader spam field=9 on ONLINE ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
         end_time = asyncio.get_event_loop().time() + SPAM_DURATION
         spam_count = 0
+        match_found = False
         while asyncio.get_event_loop().time() < end_time:
-            for conn in self.connections:
-                if not conn.connected:
-                    continue
-                pkt = spam_packets.get(conn.index)
-                if pkt:
-                    if await conn.send_packet(pkt, channel="online"):
-                        spam_count += 1
+            if not leader.connected:
+                break
+            if await leader.send_packet(spam_pkt, channel="online"):
+                spam_count += 1
+            
+            # Check for match-found packet on chat channel (non-blocking)
+            try:
+                data = await asyncio.wait_for(leader.chat_reader.read(9999), timeout=0.3)
+                if data:
+                    data_hex = data.hex()
+                    # Quick check for f2=18 (match found indicator)
+                    if '120110' in data_hex or len(data_hex) > 5000:
+                        print(f"  >> MATCH PACKET detected on chat ({len(data_hex)} hex)")
+                        match_found = True
+                        # Don't break — keep spamming, server needs the start signal
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
+            
             await asyncio.sleep(SPAM_DELAY)
 
         alive_count = sum(1 for c in self.connections if c.connected)
-        print(f"  >> Spam: {spam_count} pkts, {alive_count} alive")
+        print(f"  >> Spam: {spam_count} pkts, {alive_count} alive, match={'FOUND' if match_found else 'no'}")
 
         # ── Wait for match to complete (server auto-places + auto-eliminates) ──
         # The server places all "ready" accounts into the match automatically.
         # The account loads in, gets eliminated (nobody is playing), match ends.
         # Glory is awarded on match completion/elimination.
-        print(f"  >> Waiting {MATCH_WAIT_AFTER}s for match to complete...")
-        await asyncio.sleep(MATCH_WAIT_AFTER)
+        print(f"  >> Waiting 40s for match to complete...")
+        await asyncio.sleep(40)
 
         alive_count = sum(1 for c in self.connections if c.connected)
         print(f"  >> After wait: {alive_count} alive")
