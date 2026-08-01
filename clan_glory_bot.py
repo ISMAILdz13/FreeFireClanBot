@@ -809,9 +809,11 @@ class GuestConnection:
             return False
 
     async def start_match_leader(self):
-        """LEADER sends start-match packet (field 1=9 with UID).
-        Based on Muraxlee bot: field 9 is the only start packet needed.
-        NO field 269 — that packet is not used by real glory bots."""
+        """LEADER sends start-match packets to trigger matchmaking.
+        Sends 3 packets in sequence:
+        1. Field 269 (detailed start with device info) — match-start command
+        2. Field 214 (simple start) — reference bot's simple start
+        3. Field 9 (ready signal) — tells server leader is ready"""
         pkt_type = get_packet_type(self.region)  # 0515 for ME
 
         # 1. Detailed start with device info (field 1=269)
@@ -833,11 +835,18 @@ class GuestConnection:
         print(f"  [G{self.index+1}] LEADER start (field=269, detailed) sent!")
         await asyncio.sleep(0.5)
 
-        # 2. Basic start (field 1=9)
+        # 2. Simple start (field 1=214) — from reference bot main.py
+        fields_simple = {1: 214, 2: {1: 1}}
+        pkt_simple = await GeneRaTePk((await CrEaTe_ProTo(fields_simple)).hex(), pkt_type, self.key, self.iv)
+        await self.send_packet(pkt_simple, channel="online")
+        print(f"  [G{self.index+1}] LEADER start (field=214, simple) sent!")
+        await asyncio.sleep(0.5)
+
+        # 3. Ready signal (field 1=9)
         fields_basic = {1: 9, 2: {1: self.account_uid}}
         pkt_basic = await GeneRaTePk((await CrEaTe_ProTo(fields_basic)).hex(), pkt_type, self.key, self.iv)
         await self.send_packet(pkt_basic, channel="online")
-        print(f"  [G{self.index+1}] LEADER start (field=9, basic) sent!")
+        print(f"  [G{self.index+1}] LEADER start (field=9, ready) sent!")
 
     async def spam_start_match(self, duration: float, delay: float):
         """Members spam 'I'm ready' packets (field 1=9) on the ONLINE socket.
@@ -1112,13 +1121,15 @@ class ClanGloryBot:
                 encrypted = cipher.encrypt(pad(bytes.fromhex(payload), AES.block_size))
 
                 body = encrypted
+                # Try both JWT and access_token for Authorization
+                tokens_to_try = [conn.jwt, conn.access_token]
                 headers = {
                     "Authorization": f"Bearer {conn.jwt}",
                     "Content-Type": "application/x-www-form-urlencoded",
                     "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-A515F Build/PI)",
                     "X-Unity-Version": "2018.4.11f1",
                     "X-GA": "v1 1",
-                    "ReleaseVersion": "OB53",
+                    "ReleaseVersion": "OB54",
                     "Connection": "Keep-Alive",
                     "Accept-Encoding": "gzip",
                 }
@@ -1127,11 +1138,17 @@ class ClanGloryBot:
                 region_urls = {
                     "ME": "https://clientbp.ggpolarbear.com/GetClanInfoByClanID",
                 }
-                urls = [
+                # Use the connection's server_url as primary endpoint
+                base_url = conn.server_url.rstrip("/") if hasattr(conn, 'server_url') else ""
+                urls = []
+                if base_url:
+                    urls.append(f"{base_url}/GetClanInfoByClanID")
+                urls.extend([
                     region_urls.get(self.region, "https://clientbp.ggpolarbear.com/GetClanInfoByClanID"),
                     "https://clientbp.common.ggbluefox.com/GetClanInfoByClanID",
                     "https://clientbp.ggblueshark.com/GetClanInfoByClanID",
-                ]
+                    "https://clientbp.common.ggpolarbear.com/GetClanInfoByClanID",
+                ])
 
                 import ssl as _ssl
                 _ssl_ctx = _ssl.create_default_context()
@@ -1797,13 +1814,16 @@ class ClanGloryBot:
         print(f"  >> Squad formed, waiting 5s for server to register squad...")
         await asyncio.sleep(5)
 
-        # ALL members spam field 9 — this is BOTH "ready" signal (members) 
-        # AND "start match" signal (leader). The server needs all members
-        # to signal readiness before allocating a match.
+        # LEADER sends the actual start-match packet (field 269, detailed)
+        # This is the command that tells the server to begin matchmaking.
+        # Field 9 (spammed below) is just "I'm ready" — without field 269,
+        # the server never starts looking for a match.
         leader = self.connections[0]  # G1 is always the leader
         if not leader.connected:
             print("  >> Leader not connected, aborting cycle")
             return False
+
+        await leader.start_match_leader()
 
         # Build per-connection spam packets
         spam_packets = {}
