@@ -1090,7 +1090,8 @@ class ClanGloryBot:
     async def check_clan_glory(self, label: str = ""):
         """Check clan glory using GetClanInfoByClanID API.
         Returns raw protobuf with fields:
-        1=clanId, 2=clanName, 5=activityScore, 6=memberCount, 7=clanLevel.
+        1=clanId, 2=clanName, 5=clanLevel, 6=memberCount, 7=clanTier,
+        9=clanLevel2, 13=region, 36=clanXP, 39=clanGlory.
         Also checks clan_compiled_data from GetLoginData for comparison."""
         import urllib.request
         try:
@@ -1205,14 +1206,16 @@ class ClanGloryBot:
                                     return result
 
                                 pf = decode_proto(raw)
-                                # Field mapping: 1=clanId, 2=clanName, 5=activityScore, 
-                                # 6=memberCount, 7=clanLevel, 8=region
+                                # Field mapping: 1=clanId, 2=clanName, 5=clanLevel,
+                                # 6=memberCount, 7=clanTier, 13=region, 36=clanXP, 39=clanGlory
                                 clan_name = pf.get(2, "N/A")
-                                activity_score = pf.get(5, 0)
+                                clan_level = pf.get(5, 0)
                                 members = pf.get(6, 0)
-                                clan_level = pf.get(7, 0)
-                                clan_region = pf.get(8, "N/A")
-                                print(f"  [CLAN] {label}: name={clan_name}, level={clan_level}, members={members}, activityScore={activity_score}, region={clan_region}")
+                                clan_tier = pf.get(7, 0)
+                                clan_glory = pf.get(39, 0)
+                                clan_xp = pf.get(36, 0)
+                                clan_region = pf.get(13, "N/A")
+                                print(f"  [CLAN] {label}: name={clan_name}, level={clan_level}, tier={clan_tier}, members={members}, glory={clan_glory}, xp={clan_xp}, region={clan_region}")
                                 print(f"  [CLAN] {label}: ALL fields: {pf}")
                                 break
                     except Exception as e:
