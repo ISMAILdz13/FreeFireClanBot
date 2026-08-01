@@ -1670,32 +1670,42 @@ class ClanGloryBot:
         print(f"  >> Squad formed, waiting 5s for server to register squad...")
         await asyncio.sleep(5)
 
-        # Only the LEADER sends field 9 (start match).
-        # Members stay quiet — non-leader field 9 may confuse the server.
+        # ALL members spam field 9 — this is BOTH "ready" signal (members) 
+        # AND "start match" signal (leader). The server needs all members
+        # to signal readiness before allocating a match.
         leader = self.connections[0]  # G1 is always the leader
         if not leader.connected:
             print("  >> Leader not connected, aborting cycle")
             return False
 
-        fields = {1: 9, 2: {1: leader.account_uid}}
-        proto = await CrEaTe_ProTo(fields)
-        pkt_type = get_packet_type(self.region)
-        spam_pkt = await GeneRaTePk(proto.hex(), pkt_type, leader.key, leader.iv)
+        # Build per-connection spam packets
+        spam_packets = {}
+        for conn in self.connections:
+            if conn.connected:
+                fields = {1: 9, 2: {1: conn.account_uid}}
+                proto = await CrEaTe_ProTo(fields)
+                pkt_type = get_packet_type(self.region)
+                spam_packets[conn.index] = await GeneRaTePk(proto.hex(), pkt_type, conn.key, conn.iv)
 
         SPAM_DURATION = 17
         SPAM_DELAY = 0.2
 
-        # ── Leader spams field 1=9 on ONLINE channel (17s) ──
+        # ── ALL members spam field 1=9 on ONLINE channel (17s) ──
         # Also listen for f2=18 (match found) on leader's chat channel
-        print(f"  >> Leader spam field=9 on ONLINE ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
+        print(f"  >> Spam field=9 on ONLINE ({SPAM_DURATION}s, {SPAM_DELAY}s delay)...")
         end_time = asyncio.get_event_loop().time() + SPAM_DURATION
         spam_count = 0
         match_found = False
         while asyncio.get_event_loop().time() < end_time:
+            for conn in self.connections:
+                if not conn.connected:
+                    continue
+                pkt = spam_packets.get(conn.index)
+                if pkt:
+                    if await conn.send_packet(pkt, channel="online"):
+                        spam_count += 1
             if not leader.connected:
                 break
-            if await leader.send_packet(spam_pkt, channel="online"):
-                spam_count += 1
             
             # Check for match-found packet on chat channel (non-blocking)
             try:
