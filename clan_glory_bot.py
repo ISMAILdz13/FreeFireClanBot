@@ -1435,14 +1435,13 @@ class ClanGloryBot:
         return True
 
     async def exploit_cycle(self) -> bool:
-        """Single glory cycle: form squad -> leader starts match ONCE -> all wait for match -> join -> leave.
+        """Single glory cycle: form squad -> leader starts match ONCE -> read passively -> join -> leave.
         
-        Based on how real glory bots work:
-        - Leader sends start-match (field 269) ONCE, then keepalive
-        - Members send ready (field 9) ONCE, then keepalive
-        - All monitor for match packet (f2=18 with GroupID)
-        - Server fills remaining squad slots via matchmaking
-        - No aggressive spamming (that kills connections and disbands squad)
+        Key insight: sending ANY packets after start-match kills the connection.
+        The server sees repeated packets as suspicious and drops the connection.
+        When the leader's connection dies, the squad disbands and bots get solo matches.
+        
+        Fix: send start-match ONCE, then READ ONLY. No keepalive, no reconnection.
         """
         await self.form_squad()
         await asyncio.sleep(3)
@@ -1468,13 +1467,14 @@ class ClanGloryBot:
                 await conn.send_packet(pkt, channel="online")
                 print(f"  [G{conn.index+1}] Ready signal sent (field=9)")
         
-        print(f"  >> Waiting for match packet (monitoring all channels for 90s)...")
+        print(f"  >> PASSIVE MODE: reading all channels for 120s (no keepalive, no spam)...")
+        print(f"  >> Sending ZERO packets after this — just reading.")
         
-        MATCH_TIMEOUT = 90
+        MATCH_TIMEOUT = 120
         deadline = asyncio.get_event_loop().time() + MATCH_TIMEOUT
         
         async def read_channel_for_match(conn, channel_name, reader, deadline):
-            """Read from a channel until match found or deadline."""
+            """Read from a channel until match found or deadline. PASSIVE — no sending."""
             label = f"G{conn.index+1}/{channel_name}"
             while asyncio.get_event_loop().time() < deadline:
                 if conn.match_found:
@@ -1483,16 +1483,48 @@ class ClanGloryBot:
                     resp = await asyncio.wait_for(reader.read(65535), timeout=5.0)
                     if not resp:
                         conn.connected = False
+                        print(f"  [{label}] connection closed by server")
                         break
                     resp_hex = resp.hex()
                     if len(resp_hex) > 40:
                         print(f"  [{label}] DATA: {len(resp_hex)} hex, header={resp_hex[:16]}")
                     
+                    # Try to decode at multiple offsets for match packets
                     for skip in [10, 8, 12, 6, 4, 0, 14, 16, 18, 20, 2, 22, 24]:
                         try:
                             payload = resp_hex[skip:]
                             if len(payload) < 20:
                                 continue
+                            # Try decryption first (chat channel packets are encrypted)
+                            try:
+                                decrypted = await DEc_PacKeT(payload, conn.key, conn.iv)
+                                if decrypted:
+                                    json_str = await DeCode_PackEt(decrypted)
+                                    if json_str:
+                                        parsed = json.loads(json_str)
+                                        f2 = parsed.get('2', {})
+                                        f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                                        if isinstance(f2_val, int) and f2_val == 18 and not conn.match_found:
+                                            f5 = parsed.get('5', {})
+                                            f5d = f5.get('data', {}) if isinstance(f5, dict) else {}
+                                            group_id = None
+                                            if isinstance(f5d, dict):
+                                                f1_5 = f5d.get('1', {})
+                                                if isinstance(f1_5, dict) and 'data' in f1_5:
+                                                    group_id = f1_5['data']
+                                            if group_id and isinstance(group_id, int) and group_id > 1000000000:
+                                                print(f"  [{label}] MATCH FOUND! (decrypted) f2=18, GroupID={group_id}")
+                                                conn.match_found = True
+                                                conn.match_data = parsed
+                                                for k in sorted(f5d.keys())[:15]:
+                                                    v = f5d[k]
+                                                    if isinstance(v, dict) and 'data' in v:
+                                                        print(f"    5.{k} = {str(v['data'])[:150]}")
+                                                print(f"  *** MATCH PACKET for G{conn.index+1}! ***")
+                                                await conn.join_match(group_id)
+                            except:
+                                pass
+                            # Try raw decode
                             json_str = await DeCode_PackEt(payload)
                             if not json_str:
                                 continue
@@ -1519,7 +1551,7 @@ class ClanGloryBot:
                                         v = f5d[k]
                                         if isinstance(v, dict) and 'data' in v:
                                             print(f"    5.{k} = {str(v['data'])[:150]}")
-                                    print(f"  *** MATCH PACKET (f2=18) for G{conn.index+1}! ***")
+                                    print(f"  *** MATCH PACKET for G{conn.index+1}! ***")
                                     print(f"  [G{conn.index+1}] Joining match room (GroupID={group_id})...")
                                     await conn.join_match(group_id)
                             break
@@ -1535,54 +1567,7 @@ class ClanGloryBot:
             if not conn.match_found:
                 print(f"  [{label}] no match packet found")
         
-        async def slow_keepalive(conns, deadline):
-            """Send keepalive packets every 3s to keep connections alive.
-            Leader sends start-match (field 269), members send ready (field 9)."""
-            conn_packets = {}
-            for conn in conns:
-                if not conn.connected:
-                    continue
-                if conn == leader:
-                    fields = {1: 269, 2: {1: 8, 2: 8, 3: 11, 4: 1, 5: "samsung", 6: "SM-A145F", 7: "arm64-v8a"}}
-                else:
-                    fields = {1: 9, 2: {1: conn.account_uid}}
-                proto = await CrEaTe_ProTo(fields)
-                pkt_type = get_packet_type(self.region)
-                conn_packets[conn.index] = await GeneRaTePk(proto.hex(), pkt_type, conn.key, conn.iv)
-            
-            sent = 0
-            while asyncio.get_event_loop().time() < deadline:
-                for conn in conns:
-                    if not conn.connected or conn.match_found:
-                        continue
-                    pkt = conn_packets.get(conn.index)
-                    if pkt:
-                        try:
-                            ch = "online" if sent % 2 == 0 else "chat"
-                            await conn.send_packet(pkt, channel=ch)
-                            sent += 1
-                        except:
-                            pass
-                await asyncio.sleep(3.0)
-            return sent
-        
-        async def mid_cycle_reconnect(conns, deadline, clan_id):
-            reconnected = 0
-            while asyncio.get_event_loop().time() < deadline:
-                for conn in conns:
-                    if not conn.connected and not conn.match_found:
-                        try:
-                            await conn.connect_tcp()
-                            if conn.connected:
-                                await conn.join_clan(clan_id)
-                                reconnected += 1
-                                print(f"  [G{conn.index+1}] Mid-cycle reconnect OK")
-                        except:
-                            pass
-                await asyncio.sleep(10)
-            return reconnected
-        
-        # Run reads + keepalive + reconnect concurrently (NO aggressive spam)
+        # ONLY passive reads — NO keepalive, NO reconnection, NO spam
         read_tasks = []
         for conn in self.connections:
             if not conn.connected:
@@ -1590,17 +1575,9 @@ class ClanGloryBot:
             read_tasks.append(read_channel_for_match(conn, "online", conn.online_reader, deadline))
             read_tasks.append(read_channel_for_match(conn, "chat", conn.chat_reader, deadline))
         
-        keepalive_task = slow_keepalive(self.connections, deadline)
-        reconnect_task = mid_cycle_reconnect(self.connections, deadline, self.clan_id)
+        results = await asyncio.gather(*read_tasks, return_exceptions=True)
         
-        all_tasks = read_tasks + [keepalive_task, reconnect_task]
-        results = await asyncio.gather(*all_tasks, return_exceptions=True)
-        
-        keepalive_count = results[-2] if isinstance(results[-2], int) else 0
-        reconnect_count = results[-1] if isinstance(results[-1], int) else 0
-        print(f"  >> Keepalive: {keepalive_count} packets, {reconnect_count} reconnects")
-        
-        # Share GroupID: if any connection found a match, make ALL connections join
+        # Share GroupID: if any connection found a match, make ALL alive connections join
         match_finders = [c for c in self.connections if c.match_found and c.match_data]
         if match_finders:
             for finder in match_finders:
@@ -1619,7 +1596,8 @@ class ClanGloryBot:
                             conn.match_found = True
         
         matches_this_cycle = sum(1 for c in self.connections if c.match_found)
-        print(f"  >> {matches_this_cycle} match(es) found this cycle")
+        alive_count = sum(1 for c in self.connections if c.connected)
+        print(f"  >> {matches_this_cycle} match(es) found, {alive_count} connections still alive")
         
         # Leave team
         print(f"  >> Leaving team...")

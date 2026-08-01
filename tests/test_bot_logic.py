@@ -544,41 +544,6 @@ class TestConnectionMatchState(unittest.TestCase):
 
     # ── NEW GLORY BOT LOGIC TESTS ──────────────────────
 
-    async def test_no_aggressive_spam_in_exploit_cycle(self):
-        """FIX 31: exploit_cycle should NOT use spam_start_match (kills connections)."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertNotIn("spam_start_match", source,
-                         "exploit_cycle should not use spam_start_match")
-        self.assertNotIn("SPAM_DURATION", source,
-                         "exploit_cycle should not reference SPAM_DURATION")
-
-    async def test_exploit_cycle_uses_single_start_match(self):
-        """FIX 31: Leader should send start_match_leader ONCE, not spam."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("start_match_leader", source,
-                      "Leader should call start_match_leader")
-        self.assertIn("Ready signal sent", source,
-                      "Members should send ready signal once")
-
-    async def test_exploit_cycle_has_slow_keepalive(self):
-        """FIX 31: Keepalive should be slow (3s) not aggressive spam."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("slow_keepalive", source,
-                      "exploit_cycle should use slow_keepalive")
-        self.assertIn("3.0", source,
-                      "Keepalive interval should be 3.0s")
-
-    async def test_exploit_cycle_monitors_both_channels(self):
-        """FIX 31: Should monitor both online and chat channels for match packet."""
-        import inspect
-        source = inspect.getsource(ClanGloryBot.exploit_cycle)
-        self.assertIn("online", source)
-        self.assertIn("chat", source)
-        self.assertIn("read_channel_for_match", source)
-
     async def test_squad_size_is_3_not_4(self):
         """FIX 30: Squad should open with 2 extra slots (3 total), not 4."""
         import inspect
@@ -594,3 +559,38 @@ class TestConnectionMatchState(unittest.TestCase):
         source = inspect.getsource(ClanGloryBot.form_squad)
         self.assertNotIn("wait_for_squad_full", source,
                          "form_squad should not call wait_for_squad_full")
+
+
+    # ── PASSIVE MODE TESTS ─────────────────────────────
+
+    async def test_exploit_cycle_no_keepalive(self):
+        """No keepalive packets — they kill connections."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertNotIn("keepalive", source.lower(),
+                         "exploit_cycle should NOT have any keepalive")
+        self.assertNotIn("reconnect", source.lower(),
+                         "exploit_cycle should NOT have mid-cycle reconnection")
+
+    async def test_exploit_cycle_passive_read(self):
+        """Should read passively — no sending after start-match."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("PASSIVE", source,
+                      "exploit_cycle should be in PASSIVE mode")
+        self.assertIn("read_channel_for_match", source,
+                      "Should have read_channel_for_match")
+
+    async def test_exploit_cycle_tries_decryption(self):
+        """Should try decryption on chat channel packets (they're encrypted)."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("DEc_PacKeT", source,
+                      "Should try DEc_PacKeT for encrypted chat packets")
+
+    async def test_exploit_cycle_120s_timeout(self):
+        """Match wait should be 120s (was 90s)."""
+        import inspect
+        source = inspect.getsource(ClanGloryBot.exploit_cycle)
+        self.assertIn("120", source,
+                      "Match timeout should be 120s")
