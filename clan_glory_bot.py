@@ -914,37 +914,6 @@ class GuestConnection:
             packet = await GeneRaTePk(proto_hex, "0e15", self.key, self.iv)
             await self.send_packet(packet, channel="online")
             print(f"  [G{self.index+1}] Match join sent (GroupID={group_id}, type=0e15)")
-            # Read immediate response from server (might contain battle server IP/port)
-            for ch_name, reader in [("online", self.online_reader), ("chat", self.chat_reader)]:
-                try:
-                    resp = await asyncio.wait_for(reader.read(9999), timeout=2.0)
-                    if resp:
-                        resp_hex = resp.hex()
-                        print(f"  [G{self.index+1}] 0e15 RESPONSE ({ch_name}): {len(resp_hex)} hex, raw={resp_hex[:200]}")
-                        # Try to decode
-                        try:
-                            ascii_resp = bytes.fromhex(resp_hex).decode('ascii', errors='replace')
-                            # Look for IP addresses (x.x.x.x pattern)
-                            import re
-                            ips = re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', ascii_resp)
-                            if ips:
-                                print(f"  [G{self.index+1}] *** FOUND IPs in response: {ips}")
-                            # Look for port numbers
-                            json_starts = [i for i in range(len(ascii_resp)) if ascii_resp[i] == '{']
-                            for js in json_starts[:3]:
-                                try:
-                                    je = ascii_resp.index('}', js)
-                                    j = ascii_resp[js:je+1]
-                                    if 'port' in j.lower() or 'ip' in j.lower() or 'server' in j.lower() or 'battle' in j.lower():
-                                        print(f"  [G{self.index+1}] *** BATTLE SERVER INFO: {j[:200]}")
-                                except:
-                                    pass
-                        except:
-                            pass
-                except asyncio.TimeoutError:
-                    pass
-                except Exception as e:
-                    print(f"  [G{self.index+1}] 0e15 response read error ({ch_name}): {e}")
             await asyncio.sleep(0.5)
             # Chat channel join (type 1215) — SIMPLER fields per reference bot
             # join_room_chanel uses: 1=3, 2={1=room_id, 2=3, 3="en"}
@@ -967,6 +936,31 @@ class GuestConnection:
             return True
         except Exception as e:
             print(f"  [G{self.index+1}] Match join error: {e}")
+            return False
+
+    async def join_match_room(self, recruit_code: str) -> bool:
+        """Join the actual match room using RecruitCode via GenJoinSquadsPacket.
+        
+        After match is found (0e15 acknowledge), the bots must JOIN the match room
+        using the RecruitCode from the match packet — same way they join the squad
+        using squad_code. Without this, the bots never actually enter the room
+        and show as AFK/not-in-game.
+        """
+        if not recruit_code:
+            print(f"  [G{self.index+1}] No recruit_code for match room join")
+            return False
+        try:
+            packet = await GenJoinSquadsPacket(str(recruit_code), self.key, self.iv)
+            if packet:
+                await self.send_packet(packet, channel="online")
+                print(f"  [G{self.index+1}] Match room join sent (RecruitCode={str(recruit_code)[:30]}...)")
+                self.in_match = True
+                return True
+            else:
+                print(f"  [G{self.index+1}] GenJoinSquadsPacket returned None for match room")
+                return False
+        except Exception as e:
+            print(f"  [G{self.index+1}] Match room join error: {e}")
             return False
 
     async def leave_team(self):
@@ -1563,10 +1557,23 @@ class ClanGloryBot:
                                                     # If f2=18 (match found), join the match immediately
                                                     if f2_val == 18 and match_group_id:
                                                         print(f"  >> MATCH FOUND! GroupID={match_group_id}")
+                                                        # Extract RecruitCode from match data
+                                                        _rc = None
+                                                        import re as _re
+                                                        _f58 = ''
+                                                        if isinstance(f5, dict):
+                                                            _f58 = str(f5.get('8', {}).get('data', '')) if isinstance(f5.get('8'), dict) else str(f5.get('8', ''))
+                                                        _rc_m = _re.search(r'"RecruitCode":"([^"]+)"', _f58)
+                                                        if _rc_m:
+                                                            _rc = _rc_m.group(1)
+                                                            print(f"  >> RecruitCode: {str(_rc)[:40]}...")
                                                         print(f"  >> Joining match for all connections...")
                                                         for conn in self.connections:
                                                             if conn.connected:
                                                                 await conn.join_match(match_group_id)
+                                                                if _rc:
+                                                                    await asyncio.sleep(0.5)
+                                                                    await conn.join_match_room(_rc)
                                                                 conn.match_found = True
                                                                 conn.match_data = parsed
                                                                 await asyncio.sleep(0.5)
@@ -1698,6 +1705,16 @@ class ClanGloryBot:
                                             print(f"    5.{k} = {str(v['data'])[:150]}")
                                     print(f"  *** MATCH PACKET (f2=18) for G{conn.index+1}! ***")
                                     await conn.join_match(group_id)
+                                    # Extract RecruitCode and join match room
+                                    import re as _re
+                                    _rc_m = _re.search(r'"RecruitCode":"([^"]+)"', str(group_id))
+                                    _f58 = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else ''
+                                    _rc_m = _re.search(r'"RecruitCode":"([^"]+)"', _f58)
+                                    if _rc_m:
+                                        _rc = _rc_m.group(1)
+                                        print(f"  >> RecruitCode (verify): {str(_rc)[:40]}...")
+                                        await asyncio.sleep(0.5)
+                                        await conn.join_match_room(_rc)
                             break
                         except:
                             continue
@@ -1791,6 +1808,9 @@ class ClanGloryBot:
                         if other.index != finder.index and not other.match_found and other.connected:
                             print(f"  [G{other.index+1}] Joining match (shared by G{finder.index+1}, GroupID={shared_group_id})...")
                             await other.join_match(shared_group_id)
+                            if recruit_code:
+                                await asyncio.sleep(0.5)
+                                await other.join_match_room(recruit_code)
                             other.match_found = True
         
         if not match_finders:
@@ -2003,12 +2023,23 @@ class ClanGloryBot:
                                                     if int(gid) > 1000000 and not match_found:
                                                         match_found = True
                                                         f58_str = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else str(f5d.get('8', ''))
+                                                        match_state["match_json"] = f58_str
                                                         print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
                                                         if f58_str:
                                                             print(f"  >> Match info: {f58_str[:200]}")
+                                                        # Extract RecruitCode
+                                                        _rc = None
+                                                        import re as _re
+                                                        _rc_m = _re.search(r'"RecruitCode":"([^"]+)"', f58_str)
+                                                        if _rc_m:
+                                                            _rc = _rc_m.group(1)
+                                                            print(f"  >> RecruitCode: {str(_rc)[:40]}...")
                                                         for c in self.connections:
                                                             if c.connected:
                                                                 await c.join_match(gid)
+                                                                if _rc:
+                                                                    await asyncio.sleep(0.5)
+                                                                    await c.join_match_room(_rc)
                                                                 c.match_found = True
                                                                 await asyncio.sleep(0.5)
                                                         break
@@ -2127,6 +2158,7 @@ class ClanGloryBot:
                                                         match_state["found"] = True
                                                         match_state["gid"] = gid
                                                         f58_str = str(f5d.get('8', {}).get('data', '')) if isinstance(f5d.get('8'), dict) else str(f5d.get('8', ''))
+                                                        match_state["match_json"] = f58_str
                                                         print(f"  >> MATCH FOUND! GroupID={gid} (on G{conn.index+1}/{ch_name})")
                                                         if f58_str:
                                                             print(f"  >> Match info: {f58_str[:200]}")
