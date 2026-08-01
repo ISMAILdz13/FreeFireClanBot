@@ -1374,10 +1374,26 @@ class ClanGloryBot:
                                             if isinstance(f5, dict) and 'data' in f5:
                                                 f5d = f5['data']
                                                 if isinstance(f5d, dict):
+                                                    # Extract GroupID from field 5.1 (match-found packet)
+                                                    f51 = f5d.get('1', {})
+                                                    match_group_id = None
+                                                    if isinstance(f51, dict) and 'data' in f51:
+                                                        match_group_id = f51['data']
+                                                        print(f"    5.1 = {match_group_id} (MATCH GROUP ID)")
                                                     for k in sorted(f5d.keys())[:10]:
                                                         v = f5d[k]
                                                         if isinstance(v, dict) and 'data' in v:
                                                             print(f"    5.{k} = {str(v['data'])[:100]}")
+                                                    # If f2=18 (match found), join the match immediately
+                                                    if f2_val == 18 and match_group_id:
+                                                        print(f"  >> MATCH FOUND! GroupID={match_group_id}")
+                                                        print(f"  >> Joining match for all connections...")
+                                                        for conn in self.connections:
+                                                            if conn.connected:
+                                                                await conn.join_match(match_group_id)
+                                                                conn.match_found = True
+                                                                conn.match_data = parsed
+                                                                await asyncio.sleep(0.5)
                                             verified = True
                                             break
                             except:
@@ -1394,6 +1410,12 @@ class ClanGloryBot:
                                     if isinstance(f5, dict) and 'data' in f5:
                                         f5d = f5['data']
                                         if isinstance(f5d, dict):
+                                            # Extract GroupID from field 5.1 (match-found packet)
+                                            f51 = f5d.get('1', {})
+                                            match_group_id = None
+                                            if isinstance(f51, dict) and 'data' in f51:
+                                                match_group_id = f51['data']
+                                                print(f"    5.1 = {match_group_id} (MATCH GROUP ID)")
                                             # Check field 5.6 for squad member info
                                             f6 = f5d.get('6', {})
                                             if isinstance(f6, dict) and 'data' in f6:
@@ -1409,6 +1431,16 @@ class ClanGloryBot:
                                                 v = f5d[k]
                                                 if isinstance(v, dict) and 'data' in v:
                                                     print(f"    5.{k} = {str(v['data'])[:100]}")
+                                            # If f2=18 (match found), join the match immediately
+                                            if f2_val == 18 and match_group_id:
+                                                print(f"  >> MATCH FOUND! GroupID={match_group_id}")
+                                                print(f"  >> Joining match for all connections...")
+                                                for conn in self.connections:
+                                                    if conn.connected:
+                                                        await conn.join_match(match_group_id)
+                                                        conn.match_found = True
+                                                        conn.match_data = parsed
+                                                        await asyncio.sleep(0.5)
                                     verified = True
                                     break
                         except:
@@ -1611,6 +1643,30 @@ class ClanGloryBot:
         5. Leave squad and repeat
         """
         await self.form_squad()
+        
+        # Check if match was already found during squad formation/verify
+        match_already_found = any(c.match_found for c in self.connections if c.connected)
+        if match_already_found:
+            print(f"  >> Match found during squad formation, skipping spam...")
+            print(f"  >> Waiting 40s for match to complete...")
+            await asyncio.sleep(40)
+            alive_count = sum(1 for c in self.connections if c.connected)
+            print(f"  >> After wait: {alive_count} alive")
+            # Leave squad
+            for conn in self.connections:
+                if conn.connected:
+                    try:
+                        exit_pkt = await ExiT(conn.team_code if conn.team_code else 0, conn.key, conn.iv)
+                        await conn.send_packet(exit_pkt, channel="online")
+                        conn.in_squad = False
+                        conn.match_found = False
+                        conn.in_match = False
+                        conn.match_data = None
+                    except:
+                        pass
+            await asyncio.sleep(CYCLE_DELAY)
+            return alive_count > 0
+
         print(f"  >> Squad formed, waiting 5s for server to register squad...")
         await asyncio.sleep(5)
 
@@ -1646,11 +1702,39 @@ class ClanGloryBot:
                 data = await asyncio.wait_for(leader.chat_reader.read(9999), timeout=0.3)
                 if data:
                     data_hex = data.hex()
-                    # Quick check for f2=18 (match found indicator)
-                    if '120110' in data_hex or len(data_hex) > 5000:
-                        print(f"  >> MATCH PACKET detected on chat ({len(data_hex)} hex)")
-                        match_found = True
-                        # Don't break — keep spamming, server needs the start signal
+                    # Try to parse for f2=18 match-found packet
+                    for skip in [10, 8, 12, 6, 14, 4, 0, 16, 18]:
+                        try:
+                            payload = data_hex[skip:]
+                            if len(payload) < 20:
+                                continue
+                            json_str = await DeCode_PackEt(payload)
+                            if json_str:
+                                parsed = json.loads(json_str)
+                                f2 = parsed.get('2', {})
+                                f2_val = f2.get('data') if isinstance(f2, dict) else f2
+                                if isinstance(f2_val, int) and f2_val == 18:
+                                    f5 = parsed.get('5', {})
+                                    if isinstance(f5, dict) and 'data' in f5:
+                                        f5d = f5['data']
+                                        if isinstance(f5d, dict):
+                                            f51 = f5d.get('1', {})
+                                            if isinstance(f51, dict) and 'data' in f51:
+                                                match_group_id = f51['data']
+                                                print(f"  >> MATCH FOUND! GroupID={match_group_id}")
+                                                match_found = True
+                                                # Join match for all connections immediately
+                                                for conn in self.connections:
+                                                    if conn.connected:
+                                                        await conn.join_match(match_group_id)
+                                                        conn.match_found = True
+                                                        await asyncio.sleep(0.5)
+                                                break  # stop parsing
+                                    break
+                        except:
+                            continue
+                    if match_found:
+                        break  # stop spamming, match is found
             except asyncio.TimeoutError:
                 pass
             except Exception:
@@ -1661,12 +1745,14 @@ class ClanGloryBot:
         alive_count = sum(1 for c in self.connections if c.connected)
         print(f"  >> Spam: {spam_count} pkts, {alive_count} alive, match={'FOUND' if match_found else 'no'}")
 
-        # ── Wait for match to complete (server auto-places + auto-eliminates) ──
-        # The server places all "ready" accounts into the match automatically.
-        # The account loads in, gets eliminated (nobody is playing), match ends.
-        # Glory is awarded on match completion/elimination.
-        print(f"  >> Waiting 40s for match to complete...")
-        await asyncio.sleep(40)
+        # If match was found during spam, wait for it to complete
+        if match_found:
+            print(f"  >> Match joined, waiting 40s for match to complete...")
+            await asyncio.sleep(40)
+        else:
+            # No match found — still wait in case server auto-places
+            print(f"  >> No match found, waiting 40s anyway...")
+            await asyncio.sleep(40)
 
         alive_count = sum(1 for c in self.connections if c.connected)
         print(f"  >> After wait: {alive_count} alive")
